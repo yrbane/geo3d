@@ -1,1 +1,349 @@
-same
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>geo3d — Nested Wireframe Polyhedra</title>
+<style>
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #06060b;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  }
+  canvas {
+    width: min(90vw, 90vh);
+    height: min(90vw, 90vh);
+  }
+</style>
+</head>
+<body>
+<canvas id="geo"></canvas>
+<script>
+/**
+ * geo3d — Lightweight 3D wireframe geometry animation
+ *
+ * Three nested polyhedra rendered with Canvas 2D + manual 3D projection:
+ *   - Outer: subdivided icosahedron (geodesic sphere, 42 vertices, 120 edges)
+ *   - Middle: icosahedron (12 vertices, 30 edges)
+ *   - Inner: octahedron (6 vertices, 12 edges)
+ *
+ * Features:
+ *   - Mouse-driven rotation (smooth lerp)
+ *   - Per-layer configurable speed, scale, color, opacity
+ *   - Pre-rendered glow sprites (offscreen canvas — zero per-frame gradient alloc)
+ *   - Typed arrays for geometry & projection (cache-friendly, zero GC)
+ *   - Analytically composed rotation matrix (single trig pass)
+ *   - IntersectionObserver pause when off-screen
+ *   - Timestamp-based animation (frame-rate independent)
+ *
+ * Zero dependencies. ~3KB minified.
+ *
+ * Usage:
+ *   <canvas id="geo"></canvas>
+ *   <script src="geo3d.js"><\/script>
+ *
+ * Configuration: edit the `layers` array below.
+ *
+ * License: MIT — https://github.com/yrbane/geo3d
+ */
+(function(){
+  var c = document.getElementById('geo');
+  if (!c) return;
+  var ctx = c.getContext('2d');
+  if (!ctx) return;
+
+  /* ═══════════════════════════════════════════════════════════════════════
+     CONFIG — tweak colors, speeds, sizes here
+     ═══════════════════════════════════════════════════════════════════════ */
+  var CONFIG = {
+    background: null,         // null = transparent, or 'rgba(...)' / '#hex'
+    cameraZ: 3.5,             // camera distance (higher = smaller geometry)
+    fovFactor: 0.9,           // field-of-view multiplier
+    mouseSmooth: 0.035,       // mouse lerp speed (0–1, lower = smoother)
+    breathe: 0.04,            // outer layer scale pulsation amplitude
+    breatheSpeed: 1.5,        // pulsation speed
+    subdivisions: 1,          // outer sphere subdivisions (1 = 42v, 2 = 162v)
+  };
+
+  /* Per-layer config:
+     sc    = scale
+     spd   = rotation speed [Y, X, Z]
+     mInf  = mouse influence (0–1)
+     lw    = line width (CSS px)
+     la    = line alpha
+     col   = RGB string for color
+     pa    = point (vertex) glow alpha
+     pr    = point glow radius (CSS px)
+     dots  = draw vertex glow sprites? */
+  var layerDefs = [
+    { sc:1.5, spd:[.5,.35,.2],   mInf:.6, lw:0.6, la:.1,  col:'108,99,255',  pa:.25, pr:1.5, dots:false },
+    { sc:.8,  spd:[-.8,-.55,-.35],mInf:.7, lw:1.2, la:.25, col:'0,212,170',   pa:.5,  pr:2.5, dots:true  },
+    { sc:.35, spd:[1.3,.9,.7],   mInf:.9, lw:1.8, la:.45, col:'255,107,107',  pa:.7,  pr:4,   dots:true  },
+  ];
+
+  /* ═══════════════════════════════════════════════════════════════════════
+     GEOMETRY GENERATION
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  // Icosahedron base
+  var phi = (1 + Math.sqrt(5)) / 2;
+  var icoV = [
+    [-1,phi,0],[1,phi,0],[-1,-phi,0],[1,-phi,0],
+    [0,-1,phi],[0,1,phi],[0,-1,-phi],[0,1,-phi],
+    [phi,0,-1],[phi,0,1],[-phi,0,-1],[-phi,0,1]
+  ];
+  icoV.forEach(function(v) {
+    var l = Math.sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]);
+    v[0] /= l; v[1] /= l; v[2] /= l;
+  });
+  var icoF = [
+    [0,11,5],[0,5,1],[0,1,7],[0,7,10],[0,10,11],
+    [1,5,9],[5,11,4],[11,10,2],[10,7,6],[7,1,8],
+    [3,9,4],[3,4,2],[3,2,6],[3,6,8],[3,8,9],
+    [4,9,5],[2,4,11],[6,2,10],[8,6,7],[9,8,1]
+  ];
+
+  // Octahedron
+  var octV = [[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]];
+  var octF = [
+    [0,2,4],[0,4,3],[0,3,5],[0,5,2],
+    [1,2,5],[1,5,3],[1,3,4],[1,4,2]
+  ];
+
+  // Subdivision (project to unit sphere for geodesic effect)
+  function subdivide(V, F) {
+    var cache = {}, nV = V.map(function(v){ return v.slice(); }), nF = [];
+    function midpoint(i, j) {
+      var key = Math.min(i,j) + '_' + Math.max(i,j);
+      if (cache[key] !== undefined) return cache[key];
+      var a = nV[i], b = nV[j];
+      var m = [(a[0]+b[0])/2, (a[1]+b[1])/2, (a[2]+b[2])/2];
+      var l = Math.sqrt(m[0]*m[0] + m[1]*m[1] + m[2]*m[2]);
+      m[0] /= l; m[1] /= l; m[2] /= l;
+      cache[key] = nV.length;
+      nV.push(m);
+      return cache[key];
+    }
+    F.forEach(function(f) {
+      var a = midpoint(f[0], f[1]);
+      var b = midpoint(f[1], f[2]);
+      var c = midpoint(f[2], f[0]);
+      nF.push([f[0],a,c], [f[1],b,a], [f[2],c,b], [a,b,c]);
+    });
+    return { v: nV, f: nF };
+  }
+
+  // Extract unique edges from face list
+  function extractEdges(F) {
+    var seen = {}, edges = [];
+    F.forEach(function(f) {
+      for (var i = 0; i < 3; i++) {
+        var a = f[i], b = f[(i+1) % 3];
+        var key = Math.min(a,b) + '_' + Math.max(a,b);
+        if (!seen[key]) { seen[key] = 1; edges.push([a, b]); }
+      }
+    });
+    return edges;
+  }
+
+  // Build subdivided icosahedron
+  var subdiv = { v: icoV, f: icoF };
+  for (var si = 0; si < CONFIG.subdivisions; si++) {
+    subdiv = subdivide(subdiv.v, subdiv.f);
+  }
+
+  /* ═══════════════════════════════════════════════════════════════════════
+     PREPARE GPU-FRIENDLY DATA STRUCTURES
+     ═══════════════════════════════════════════════════════════════════════ */
+  var geoSets = [
+    { v: subdiv.v, e: extractEdges(subdiv.f) },
+    { v: icoV,     e: extractEdges(icoF)     },
+    { v: octV,     e: extractEdges(octF)     },
+  ];
+
+  var layers = [];
+  for (var li = 0; li < 3; li++) {
+    var def = layerDefs[li], geo = geoSets[li];
+    var nv = geo.v.length, ne = geo.e.length;
+
+    // Flatten vertices into typed array
+    var fv = new Float64Array(nv * 3);
+    for (var i = 0; i < nv; i++) {
+      fv[i*3]   = geo.v[i][0];
+      fv[i*3+1] = geo.v[i][1];
+      fv[i*3+2] = geo.v[i][2];
+    }
+
+    // Flatten edges into typed array
+    var fe = new Uint16Array(ne * 2);
+    for (var i = 0; i < ne; i++) {
+      fe[i*2]   = geo.e[i][0];
+      fe[i*2+1] = geo.e[i][1];
+    }
+
+    layers.push({
+      sc: def.sc, spd: def.spd, mInf: def.mInf,
+      lw: def.lw, la: def.la, col: def.col,
+      pa: def.pa, pr: def.pr, dots: def.dots,
+      fv: fv, fe: fe, nv: nv, ne: ne,
+      proj: new Float64Array(nv * 2),  // pre-allocated projection buffer
+    });
+  }
+
+  /* ═══════════════════════════════════════════════════════════════════════
+     PRE-RENDER GLOW SPRITES (offscreen canvas)
+     ═══════════════════════════════════════════════════════════════════════ */
+  var DPR = 1;
+  function resize() {
+    DPR = 1; // keep at 1 for perf; change to window.devicePixelRatio for retina
+    var w = c.clientWidth, h = c.clientHeight;
+    var nw = Math.round(w * DPR), nh = Math.round(h * DPR);
+    if (c.width !== nw || c.height !== nh) { c.width = nw; c.height = nh; }
+  }
+  resize();
+
+  function makeGlowSprite(col, alpha, radius) {
+    var sz = Math.ceil(radius * 2) | 0;
+    if (sz < 2) sz = 2;
+    var oc = document.createElement('canvas');
+    oc.width = sz; oc.height = sz;
+    var ox = oc.getContext('2d');
+    var gr = ox.createRadialGradient(sz/2, sz/2, 0, sz/2, sz/2, sz/2);
+    gr.addColorStop(0, 'rgba(' + col + ',' + alpha + ')');
+    gr.addColorStop(1, 'rgba(' + col + ',0)');
+    ox.fillStyle = gr;
+    ox.fillRect(0, 0, sz, sz);
+    return oc;
+  }
+
+  var sprites = [];
+  function rebuildSprites() {
+    sprites = [];
+    for (var i = 0; i < 3; i++) {
+      var L = layers[i], r = L.pr * DPR * 2.5;
+      sprites[i] = makeGlowSprite(L.col, L.pa, r);
+    }
+  }
+  rebuildSprites();
+
+  /* ═══════════════════════════════════════════════════════════════════════
+     3D MATH — analytically composed rotation Rz * Rx * Ry
+     ═══════════════════════════════════════════════════════════════════════ */
+  var R = new Float64Array(9);
+
+  function buildRotation(ay, ax, az) {
+    var cy = Math.cos(ay), sy = Math.sin(ay);
+    var cx = Math.cos(ax), sx = Math.sin(ax);
+    var cz = Math.cos(az), sz = Math.sin(az);
+    R[0] = cz*cy + sz*sx*sy;  R[1] = sz*cx;  R[2] = -cz*sy + sz*sx*cy;
+    R[3] = -sz*cy + cz*sx*sy; R[4] = cz*cx;  R[5] =  sz*sy + cz*sx*cy;
+    R[6] = cx*sy;              R[7] = -sx;    R[8] =  cx*cy;
+  }
+
+  /* ═══════════════════════════════════════════════════════════════════════
+     MOUSE TRACKING
+     ═══════════════════════════════════════════════════════════════════════ */
+  var mx = 0, my = 0, smx = 0, smy = 0;
+  document.addEventListener('mousemove', function(e) {
+    mx = (e.clientX / window.innerWidth  - 0.5) * 2;
+    my = (e.clientY / window.innerHeight - 0.5) * 2;
+  });
+
+  /* ═══════════════════════════════════════════════════════════════════════
+     VISIBILITY & RESIZE
+     ═══════════════════════════════════════════════════════════════════════ */
+  var needResize = false;
+  window.addEventListener('resize', function() { needResize = true; });
+
+  var visible = true;
+  var visObs = new IntersectionObserver(function(entries) {
+    visible = entries[0].isIntersecting;
+  }, { threshold: 0 });
+  visObs.observe(c);
+
+  /* ═══════════════════════════════════════════════════════════════════════
+     RENDER LOOP
+     ═══════════════════════════════════════════════════════════════════════ */
+  var t = 0, lastT = 0;
+
+  function draw(now) {
+    requestAnimationFrame(draw);
+    if (!visible) return;
+
+    // Timestamp-based animation (frame-rate independent)
+    if (!lastT) lastT = now;
+    t += (now - lastT) * 0.000004;
+    lastT = now;
+
+    if (needResize) { resize(); rebuildSprites(); needResize = false; }
+
+    // Smooth mouse
+    smx += (mx - smx) * CONFIG.mouseSmooth;
+    smy += (my - smy) * CONFIG.mouseSmooth;
+
+    var W = c.width, H = c.height, hw = W * 0.5, hh = H * 0.5;
+    var fov = Math.min(W, H) * CONFIG.fovFactor;
+    var camZ = CONFIG.cameraZ;
+
+    ctx.clearRect(0, 0, W, H);
+
+    // Optional background
+    if (CONFIG.background) {
+      ctx.fillStyle = CONFIG.background;
+      ctx.fillRect(0, 0, W, H);
+    }
+
+    var pulse = 1 + Math.sin(t * CONFIG.breatheSpeed) * CONFIG.breathe;
+
+    for (var li = 0; li < 3; li++) {
+      var L = layers[li];
+      var fv = L.fv, fe = L.fe, nv = L.nv, ne = L.ne, pr = L.proj;
+      var sc = L.sc * (li === 0 ? pulse : 1);
+
+      // Build combined rotation matrix
+      buildRotation(
+        t * L.spd[0] + smx * L.mInf,
+        t * L.spd[1] + smy * L.mInf,
+        t * L.spd[2]
+      );
+
+      // Transform + project all vertices (inlined, zero allocation)
+      for (var i = 0, i3 = 0, i2 = 0; i < nv; i++, i3 += 3, i2 += 2) {
+        var vx = fv[i3], vy = fv[i3+1], vz = fv[i3+2];
+        var tz = (R[6]*vx + R[7]*vy + R[8]*vz) * sc - camZ;
+        var f  = fov / (-tz);
+        pr[i2]   = hw + (R[0]*vx + R[1]*vy + R[2]*vz) * sc * f;
+        pr[i2+1] = hh - (R[3]*vx + R[4]*vy + R[5]*vz) * sc * f;
+      }
+
+      // Draw edges (single batched path)
+      ctx.lineWidth = L.lw * DPR;
+      ctx.strokeStyle = 'rgba(' + L.col + ',' + L.la + ')';
+      ctx.beginPath();
+      for (var i = 0, i2 = 0; i < ne; i++, i2 += 2) {
+        var ai = fe[i2] << 1, bi = fe[i2+1] << 1;
+        ctx.moveTo(pr[ai], pr[ai+1]);
+        ctx.lineTo(pr[bi], pr[bi+1]);
+      }
+      ctx.stroke();
+
+      // Draw vertex glow sprites
+      if (L.dots) {
+        var spr = sprites[li], ss = spr.width, sh = ss * 0.5;
+        for (var i = 0, i2 = 0; i < nv; i++, i2 += 2) {
+          ctx.drawImage(spr, pr[i2] - sh, pr[i2+1] - sh);
+        }
+      }
+    }
+  }
+
+  requestAnimationFrame(draw);
+})();
+</script>
+</body>
+</html>
