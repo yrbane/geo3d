@@ -10,6 +10,9 @@ Platonic solids as glowing nested wireframes, tilted by pointer movement.
 
 - **7 shapes** — icosahedron, octahedron, tetrahedron, cube, dodecahedron, and two geodesic spheres
 - **8 colour presets** + fully custom palettes
+- **Holographic faces** — a random subset of polygons fills translucently, with
+  two-sided lighting and specular "reflections" that sweep as the solids turn
+  (enabled only on capable hardware — see below)
 - **Seeded generative mode** — `?random` picks a seed you can permalink and reproduce
 - **Pointer & touch** driven rotation with smooth easing
 - **Adaptive quality** — probes the device and continuously watches the frame
@@ -82,9 +85,11 @@ itself smooth:
 2. It then **watches the real frame rate** (smoothed) and climbs or drops one
    quality tier at a time, with hysteresis and a cooldown so it never flaps.
 
-Degradation is ordered cheapest-impact first, so it stays pretty as long as
-possible: **pixel ratio → vertex glow → layer count → geodesic detail**.
-The layout is regenerated from the same seed on every change, so re-tuning is
+The heavy, pretty extras only switch on when there's headroom and are the first
+to go under load: **specular reflections** (ultra) and **translucent lit faces**
+(high) appear on capable machines, then degradation continues cheapest-impact
+first — **pixel ratio → vertex glow → layer count → geodesic detail**. The
+layout is regenerated from the same seed on every change, so re-tuning is
 seamless — no popping to a different figure.
 
 Pin a fixed tier with `quality: 'high'` / `?quality=4` to opt out.

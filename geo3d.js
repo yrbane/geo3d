@@ -93,7 +93,7 @@
   };
   const geodesic = n => { let v = ICO_V, f = ICO_F; while (n-- > 0) [v, f] = subdivide(v, f); return [v, f]; };
 
-  const shape = (v, f) => ({ v, e: edgesOf(f) });
+  const shape = (v, f) => ({ v, f, e: edgesOf(f) });
   const SHAPE_NAMES = ['ico', 'oct', 'tet', 'cube', 'dodec', 'geo1', 'geo2'];
   const catalogue = sub => ({
     ico:  shape(ICO_V, ICO_F),   oct: shape(OCT_V, OCT_F),   tet: shape(TET_V, TET_F),
@@ -116,6 +116,11 @@
 
   /* ── Helpers ───────────────────────────────────────────────────────────── */
   const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+  // View-space lighting: a fixed key light + its Blinn-Phong half-vector (view
+  // dir is +z). The solids rotate under it, so highlights sweep across faces.
+  const _unit3 = (x, y, z) => { const l = Math.hypot(x, y, z) || 1; return [x / l, y / l, z / l]; };
+  const LIGHT = _unit3(0.35, -0.55, 0.85);
+  const HALF = _unit3(LIGHT[0], LIGHT[1], LIGHT[2] + 1);
   // mulberry32 — tiny seeded PRNG so `?random` layouts are reproducible via `?seed`.
   const prng = a => () => {
     a = a + 0x6D2B79F5 | 0;
@@ -146,11 +151,11 @@
      GPU/CPU, degrading cheap→expensive: pixel ratio, then vertex glow, then
      layer count, then geodesic detail. */
   const TIERS = [
-    { dpr: 1,   glow: false, layers: 2, sub: 0 },
-    { dpr: 1,   glow: false, layers: 3, sub: 1 },
-    { dpr: 1.5, glow: true,  layers: 4, sub: 1 },
-    { dpr: 2,   glow: true,  layers: 6, sub: 1 },
-    { dpr: 2,   glow: true,  layers: 6, sub: 2 },
+    { dpr: 1,   glow: false, layers: 2, sub: 0, fill: false, spec: false },
+    { dpr: 1,   glow: false, layers: 3, sub: 1, fill: false, spec: false },
+    { dpr: 1.5, glow: true,  layers: 4, sub: 1, fill: false, spec: false },
+    { dpr: 2,   glow: true,  layers: 6, sub: 1, fill: true,  spec: false },
+    { dpr: 2,   glow: true,  layers: 6, sub: 2, fill: true,  spec: true  },
   ];
   const QUALITY_NAMES = { low: 1, medium: 2, high: 3, ultra: 4 };
   // Coarse starting tier from device hints (logical cores, RAM, pixel density).
@@ -201,6 +206,9 @@
       this.curSub = Math.min(this.userSub, TIERS[lvl].sub);
       this.dpr = Math.min(this._maxDpr, TIERS[lvl].dpr);
       this.glowOn = TIERS[lvl].glow;
+      this.fillOn = TIERS[lvl].fill;
+      this.specOn = TIERS[lvl].spec;
+      this._fillBuf = [];
 
       this.shapes = catalogue(this.curSub);
       this.layers = this._layers(o, prng(this.seed));
@@ -245,8 +253,18 @@
         for (let k = 0, a = 0; k < nv; k++, a += 3) { fv[a] = geo.v[k][0]; fv[a+1] = geo.v[k][1]; fv[a+2] = geo.v[k][2]; }
         const fe = new Uint16Array(ne * 2);
         for (let k = 0, a = 0; k < ne; k++, a += 2) { fe[a] = geo.e[k][0]; fe[a+1] = geo.e[k][1]; }
+        // "Sometimes fill some polygons" — a seeded subset of faces gets a
+        // translucent, lit fill (drawn only when the quality tier allows it).
+        let fillFaces = null;
+        if (rnd() < 0.62) {
+          fillFaces = [];
+          for (let fi = 0; fi < geo.f.length; fi++) if (rnd() < 0.6) fillFaces.push(fi);
+          if (!fillFaces.length) fillFaces = null;
+        }
         out.push({
-          name, spd, fv, fe, nv, ne, col, proj: new Float64Array(nv * 2),
+          name, spd, fv, fe, nv, ne, col,
+          proj: new Float64Array(nv * 2), rv: new Float64Array(nv * 3),
+          faces: geo.f, fillFaces,
           sc: 1.5 * Math.pow(0.3, t), mInf: 0.6 + t * 0.35,
           lw: 0.6 + t * 1.3, la: 0.12 + t * 0.38, pa: 0.25 + t * 0.55,
           pr: 1.5 + t * 3, dots: i > 0,
@@ -274,6 +292,8 @@
         this.layers = this._layers(this._o, prng(this.seed));
       }
       this.glowOn = T.glow;
+      this.fillOn = T.fill;
+      this.specOn = T.spec;
       this.activeCount = Math.min(this.layers.length, T.layers);
       this.dpr = Math.min(this._maxDpr, T.dpr);
       this.resize();
@@ -312,6 +332,41 @@
       R[6] = cx*sy;             R[7] = -sx;   R[8] =  cx*cy;
     }
 
+    // Holographic face pass: fill this layer's selected faces as translucent,
+    // two-sided-lit, depth-sorted polygons, with an optional specular sheen
+    // ("reflections"). Uses reusable typed scratch buffers — no per-frame GC.
+    _fill(L) {
+      const { rv, proj, faces, fillFaces, col } = L, ctx = this.ctx, n = fillFaces.length;
+      if (!this._fz || this._fz.length < n) {
+        this._fz = new Float64Array(n); this._ford = new Int32Array(n);
+        this._fin = new Float32Array(n); this._fsp = new Float32Array(n);
+      }
+      const fz = this._fz, ord = this._ford, fin = this._fin, fsp = this._fsp;
+      for (let k = 0; k < n; k++) {
+        const face = faces[fillFaces[k]], a = face[0]*3, b = face[1]*3, c = face[2]*3;
+        const e1x = rv[b]-rv[a], e1y = rv[b+1]-rv[a+1], e1z = rv[b+2]-rv[a+2];
+        const e2x = rv[c]-rv[a], e2y = rv[c+1]-rv[a+1], e2z = rv[c+2]-rv[a+2];
+        let nx = e1y*e2z - e1z*e2y, ny = e1z*e2x - e1x*e2z, nz = e1x*e2y - e1y*e2x;
+        const nl = Math.hypot(nx, ny, nz) || 1; nx /= nl; ny /= nl; nz /= nl;
+        fin[k] = 0.22 + Math.abs(nx*LIGHT[0] + ny*LIGHT[1] + nz*LIGHT[2]) * 0.78;
+        if (this.specOn) { const h = Math.abs(nx*HALF[0] + ny*HALF[1] + nz*HALF[2]), h2 = h*h; fsp[k] = h2*h2*h2; }
+        let z = 0; for (let j = 0; j < face.length; j++) z += rv[face[j]*3 + 2];
+        fz[k] = z / face.length; ord[k] = k;
+      }
+      const view = ord.subarray(0, n);
+      view.sort((p, q) => fz[p] - fz[q]);      // farthest first (back-to-front)
+      for (let m = 0; m < n; m++) {
+        const k = view[m], face = faces[fillFaces[k]];
+        ctx.beginPath();
+        ctx.moveTo(proj[face[0]*2], proj[face[0]*2 + 1]);
+        for (let j = 1; j < face.length; j++) ctx.lineTo(proj[face[j]*2], proj[face[j]*2 + 1]);
+        ctx.closePath();
+        ctx.fillStyle = `rgba(${col},${0.05 + fin[k] * 0.13})`;
+        ctx.fill();
+        if (this.specOn && fsp[k] > 0.03) { ctx.fillStyle = `rgba(255,255,255,${fsp[k] * 0.22})`; ctx.fill(); }
+      }
+    }
+
     _frame(now) {
       this.raf = requestAnimationFrame(this._loop);
       if (!this.visible) { this.last = 0; return; }
@@ -334,15 +389,19 @@
       if (this.bg) { ctx.fillStyle = this.bg; ctx.fillRect(0, 0, W, H); }
       const pulse = 1 + Math.sin(this.t * 1.5) * this.breathe;
 
+      const camZ = this.camZ;
       for (let li = 0; li < this.activeCount; li++) {
-        const L = this.layers[li], { fv, fe, nv, ne, proj } = L, sc = L.sc * (li === 0 ? pulse : 1);
+        const L = this.layers[li], { fv, rv, fe, nv, ne, proj } = L, sc = L.sc * (li === 0 ? pulse : 1);
         this._rot(this.t * L.spd[0] + this.smx * L.mInf, this.t * L.spd[1] + this.smy * L.mInf, this.t * L.spd[2]);
         for (let i = 0, a = 0, b = 0; i < nv; i++, a += 3, b += 2) {
           const x = fv[a], y = fv[a+1], z = fv[a+2];
-          const tz = (R[6]*x + R[7]*y + R[8]*z) * sc - this.camZ, f = fov / -tz;
-          proj[b]   = hw + (R[0]*x + R[1]*y + R[2]*z) * sc * f;
-          proj[b+1] = hh - (R[3]*x + R[4]*y + R[5]*z) * sc * f;
+          const rx = (R[0]*x + R[1]*y + R[2]*z) * sc, ry = (R[3]*x + R[4]*y + R[5]*z) * sc, rz = (R[6]*x + R[7]*y + R[8]*z) * sc;
+          rv[a] = rx; rv[a+1] = ry; rv[a+2] = rz;
+          const f = fov / (camZ - rz);      // perspective (–tz = camZ – rz)
+          proj[b] = hw + rx * f; proj[b+1] = hh - ry * f;
         }
+        // Holographic pass: translucent, lit, depth-sorted faces (tier-gated).
+        if (this.fillOn && L.fillFaces) this._fill(L);
         ctx.lineWidth = L.lw * this.dpr;
         ctx.strokeStyle = `rgba(${L.col},${L.la})`;
         ctx.beginPath();
