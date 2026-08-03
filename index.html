@@ -39,11 +39,14 @@
 
   <script src="geo3d.js"></script>
   <script>
-    // Tiny overlay: show the active layout + a reproducible-random permalink.
+    // Tiny overlay: layout, a live quality readout (adapts to your device),
+    // and a reproducible-random permalink.
     addEventListener('DOMContentLoaded', () => {
       const g = document.getElementById('geo')._geo3d, el = document.getElementById('info');
       if (!g || !el) return;
-      el.innerHTML = `${g.info}<br><a href="?random">↻ random</a> · <a href="?seed=${g.seed}">permalink</a>`;
+      el.innerHTML = `<span id="q"></span>${g.info}<br><a href="?random">↻ random</a> · <a href="?seed=${g.seed}">permalink</a>`;
+      const q = document.getElementById('q');
+      setInterval(() => (q.textContent = `Q${g.level}${g.auto ? '~' : ''} · `), 800);
       let t = setTimeout(() => (el.style.opacity = 0), 3500);
       el.onmouseenter = () => { clearTimeout(t); el.style.opacity = 1; };
       el.onmouseleave = () => (t = setTimeout(() => (el.style.opacity = 0), 1500));

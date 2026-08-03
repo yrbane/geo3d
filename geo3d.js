@@ -140,10 +140,33 @@
     return oc;
   };
 
+  /* ── Adaptive quality ──────────────────────────────────────────────────
+     Tiers 0 (lowest) → 4 (highest), each capping the user's options. A runtime
+     FPS monitor climbs/drops tiers so the animation stays smooth on the actual
+     GPU/CPU, degrading cheap→expensive: pixel ratio, then vertex glow, then
+     layer count, then geodesic detail. */
+  const TIERS = [
+    { dpr: 1,   glow: false, layers: 2, sub: 0 },
+    { dpr: 1,   glow: false, layers: 3, sub: 1 },
+    { dpr: 1.5, glow: true,  layers: 4, sub: 1 },
+    { dpr: 2,   glow: true,  layers: 6, sub: 1 },
+    { dpr: 2,   glow: true,  layers: 6, sub: 2 },
+  ];
+  const QUALITY_NAMES = { low: 1, medium: 2, high: 3, ultra: 4 };
+  // Coarse starting tier from device hints (logical cores, RAM, pixel density).
+  const guessTier = () => {
+    const cores = navigator.hardwareConcurrency || 4, mem = navigator.deviceMemory || 4;
+    let s = 2;
+    s += cores >= 8 ? 1 : cores >= 4 ? 0 : -1;
+    s += mem >= 8 ? 1 : mem >= 4 ? 0 : -1;
+    s += (window.devicePixelRatio || 1) > 2 ? -1 : 0;
+    return clamp(s, 1, 4);
+  };
+
   const DEFAULTS = {
     shapes: ['geo1', 'ico', 'oct', 'tet', 'cube', 'dodec'],
     preset: 'default', colors: null, layers: 3, speed: 'normal',
-    background: null, breathe: 0.04, subdivisions: 1,
+    background: null, breathe: 0.04, subdivisions: 1, quality: 'auto',
     fov: 0.9, camera: 3.5, mouse: 0.035, random: false, seed: null,
   };
 
@@ -155,7 +178,7 @@
       const o = { ...DEFAULTS, ...options };
       this.canvas = canvas; this.ctx = ctx;
 
-      this.dpr = options.dpr || Math.min(window.devicePixelRatio || 1, 2);
+      this._maxDpr = options.dpr || Math.min(window.devicePixelRatio || 1, 2);
       this.reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
       this.speed = (typeof o.speed === 'number' ? o.speed : SPEEDS[o.speed] ?? 1) * (this.reduced ? 0.12 : 1);
       this.bg = o.background;
@@ -166,10 +189,25 @@
       this.random = !!o.random;
       this.seed = (o.seed != null ? o.seed : Math.random() * 2 ** 32) >>> 0;
 
-      this.shapes = catalogue(clamp(o.subdivisions | 0, 0, 3));
+      // Quality: 'auto' (default) starts from a device-hint tier then self-tunes
+      // on measured FPS; a number (0–4) or name (low/medium/high/ultra) pins it.
+      this._o = o;
+      this.userSub = clamp(o.subdivisions | 0, 0, 3);
+      this.auto = o.quality === 'auto' || o.quality == null;
+      let lvl = this.auto ? guessTier()
+        : typeof o.quality === 'number' ? clamp(o.quality | 0, 0, 4) : (QUALITY_NAMES[o.quality] ?? 3);
+      if (this.reduced) lvl = Math.min(lvl, 1);
+      this.level = lvl;
+      this.curSub = Math.min(this.userSub, TIERS[lvl].sub);
+      this.dpr = Math.min(this._maxDpr, TIERS[lvl].dpr);
+      this.glowOn = TIERS[lvl].glow;
+
+      this.shapes = catalogue(this.curSub);
       this.layers = this._layers(o, prng(this.seed));
-      this.info = `${this.layers.length}L · ${this.random ? 'random#' + this.seed
-        : Array.isArray(o.preset) || Array.isArray(o.colors) ? 'custom' : o.preset} · ${this.layers.map(l => l.name).join('+')}`;
+      this.activeCount = Math.min(this.layers.length, TIERS[lvl].layers);
+      this.info = `${this.activeCount}L · ${this.random ? 'random#' + this.seed
+        : Array.isArray(o.preset) || Array.isArray(o.colors) ? 'custom' : o.preset} · ${this.layers.slice(0, this.activeCount).map(l => l.name).join('+')}`;
+      this._fps = 60; this._cooldown = 60;
 
       this.R = new Float64Array(9);
       this.mx = this.my = this.smx = this.smy = this.t = this.last = 0;
@@ -223,6 +261,32 @@
       this.sprites = this.layers.map(L => glowSprite(L.col, L.pa, L.pr * this.dpr * 2.5));
     }
 
+    // Re-tune to quality `level`, rebuilding only what changed. Geometry is
+    // regenerated from the same seed, so the layout is stable across changes.
+    _retune(level) {
+      level = clamp(level, 0, 4);
+      if (level === this.level) return;
+      this.level = level;
+      const T = TIERS[level], sub = Math.min(this.userSub, T.sub);
+      if (sub !== this.curSub) {
+        this.curSub = sub;
+        this.shapes = catalogue(sub);
+        this.layers = this._layers(this._o, prng(this.seed));
+      }
+      this.glowOn = T.glow;
+      this.activeCount = Math.min(this.layers.length, T.layers);
+      this.dpr = Math.min(this._maxDpr, T.dpr);
+      this.resize();
+      this._cooldown = 120; // ~2 s to settle before the next change
+    }
+
+    // Nudge quality from smoothed FPS (hysteresis gap + cooldown = no flapping).
+    _adapt() {
+      if (this._cooldown > 0) { this._cooldown--; return; }
+      if (this._fps < 45 && this.level > 0) this._retune(this.level - 1);
+      else if (this._fps > 58 && this.level < 4) this._retune(this.level + 1);
+    }
+
     _bind() {
       const aim = (x, y) => { this.mx = (x / innerWidth - 0.5) * 2; this.my = (y / innerHeight - 0.5) * 2; };
       this._h = {
@@ -252,8 +316,13 @@
       this.raf = requestAnimationFrame(this._loop);
       if (!this.visible) { this.last = 0; return; }
       if (!this.last) this.last = now;
-      this.t += (now - this.last) * 4e-6 * this.speed;
+      const dt = now - this.last;
+      this.t += dt * 4e-6 * this.speed;
       this.last = now;
+      if (this.auto && dt > 0 && dt < 200) { // skip stalls / tab-wake spikes
+        this._fps += (1000 / dt - this._fps) * 0.05;
+        this._adapt();
+      }
       if (this._dirty) { this.resize(); this._dirty = false; }
 
       const { ctx, R } = this, W = this.canvas.width, H = this.canvas.height;
@@ -265,7 +334,7 @@
       if (this.bg) { ctx.fillStyle = this.bg; ctx.fillRect(0, 0, W, H); }
       const pulse = 1 + Math.sin(this.t * 1.5) * this.breathe;
 
-      for (let li = 0; li < this.layers.length; li++) {
+      for (let li = 0; li < this.activeCount; li++) {
         const L = this.layers[li], { fv, fe, nv, ne, proj } = L, sc = L.sc * (li === 0 ? pulse : 1);
         this._rot(this.t * L.spd[0] + this.smx * L.mInf, this.t * L.spd[1] + this.smy * L.mInf, this.t * L.spd[2]);
         for (let i = 0, a = 0, b = 0; i < nv; i++, a += 3, b += 2) {
@@ -282,7 +351,7 @@
           ctx.moveTo(proj[a], proj[a+1]); ctx.lineTo(proj[b], proj[b+1]);
         }
         ctx.stroke();
-        if (L.dots) {
+        if (L.dots && this.glowOn) {
           const s = this.sprites[li], h = s.width / 2;
           for (let i = 0, b = 0; i < nv; i++, b += 2) ctx.drawImage(s, proj[b] - h, proj[b+1] - h);
         }
@@ -311,6 +380,7 @@
     if (has('colors')) o.colors = get('colors').split(';');
     if (has('shapes')) o.shapes = get('shapes').split(',');
     if (has('speed')) o.speed = get('speed');
+    if (has('quality')) { const q = get('quality'); o.quality = /^\d+$/.test(q) ? parseInt(q, 10) : q; }
     if (has('layers')) o.layers = parseInt(get('layers'), 10);
     if (has('bg')) o.background = '#' + get('bg');
     if (has('background')) o.background = get('background');
@@ -324,7 +394,7 @@
   const init = () => {
     const c = document.querySelector('canvas#geo, canvas[data-geo3d]');
     if (!c || c._geo3d) return;
-    const d = c.dataset, p = new URLSearchParams(location.search);
+    const d = c.dataset || {}, p = new URLSearchParams(location.search);
     c._geo3d = new Geo3D(c, {
       ...readOpts(k => k in d, k => d[k]),
       ...readOpts(k => p.has(k), k => p.get(k)),

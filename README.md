@@ -12,6 +12,8 @@ Platonic solids as glowing nested wireframes, tilted by pointer movement.
 - **8 colour presets** + fully custom palettes
 - **Seeded generative mode** — `?random` picks a seed you can permalink and reproduce
 - **Pointer & touch** driven rotation with smooth easing
+- **Adaptive quality** — probes the device and continuously watches the frame
+  rate, dialling detail up or down so it stays smooth on any GPU/CPU
 - **Retina-crisp** (device-pixel-ratio aware), pauses off-screen / in background tab, respects `prefers-reduced-motion`
 - Configurable by **URL query** *or* a **programmatic API**
 
@@ -47,6 +49,7 @@ Every option is also accepted as a URL query parameter on the auto-init canvas.
 | `preset` | preset name or `['r,g,b', …]` | `default` |
 | `colors` | explicit `['r,g,b', …]` (query: `r,g,b;r,g,b`) | — |
 | `layers` | `1`–`6` | `3` |
+| `quality` | `auto` · `low` `medium` `high` `ultra` · `0`–`4` | `auto` |
 | `speed` | `slow` `normal` `fast` `insane` or a number | `normal` |
 | `background` / `bg` | `#rrggbb` (bare hex via `?bg=`) | transparent |
 | `breathe` | `0`–`1` (outer pulsation) | `0.04` |
@@ -67,6 +70,24 @@ Every option is also accepted as a URL query parameter on the auto-init canvas.
 
 **Shapes:** `ico` `oct` `tet` `cube` `dodec` `geo1` `geo2`
 **Presets:** `default` `neon` `fire` `ice` `pastel` `mono` `gold` `matrix`
+
+## Adaptive performance
+
+By default (`quality: 'auto'`) geo3d **tests the machine it runs on** and keeps
+itself smooth:
+
+1. It picks a **starting tier** from device hints — logical cores
+   (`navigator.hardwareConcurrency`), memory (`navigator.deviceMemory`) and
+   pixel density.
+2. It then **watches the real frame rate** (smoothed) and climbs or drops one
+   quality tier at a time, with hysteresis and a cooldown so it never flaps.
+
+Degradation is ordered cheapest-impact first, so it stays pretty as long as
+possible: **pixel ratio → vertex glow → layer count → geodesic detail**.
+The layout is regenerated from the same seed on every change, so re-tuning is
+seamless — no popping to a different figure.
+
+Pin a fixed tier with `quality: 'high'` / `?quality=4` to opt out.
 
 ## How it works
 
