@@ -135,6 +135,16 @@
     const f = n => Math.round((l - a * Math.max(-1, Math.min(k(n) - 3, 9 - k(n), 1))) * 255);
     return `${f(0)},${f(8)},${f(4)}`;
   };
+  // 'r,g,b' → [h(0–360), s(0–100), l(0–100)] — used to drift a layer's hue over time.
+  const rgbToHsl = str => {
+    const [r, g, b] = str.split(',').map(n => +n / 255);
+    const mx = Math.max(r, g, b), mn = Math.min(r, g, b), d = mx - mn;
+    let h = 0;
+    if (d) { h = mx === r ? ((g - b) / d) % 6 : mx === g ? (b - r) / d + 2 : (r - g) / d + 4; h = (h * 60 + 360) % 360; }
+    const l = (mx + mn) / 2, s = d ? d / (1 - Math.abs(2 * l - 1)) : 0;
+    return [h, s * 100, l * 100];
+  };
+  const MAX_SHARDS = 160;   // glass-shard particle pool cap
   // Pre-rendered radial glow sprite (drawn once, blitted per vertex).
   const glowSprite = (col, alpha, radius) => {
     const sz = Math.max(2, Math.ceil(radius * 2)), oc = document.createElement('canvas');
@@ -208,7 +218,16 @@
       this.glowOn = TIERS[lvl].glow;
       this.fillOn = TIERS[lvl].fill;
       this.specOn = TIERS[lvl].spec;
-      this._fillBuf = [];
+
+      // Living-glass state: slow hue drift, a spontaneous-shatter timer, and a
+      // reusable glass-shard particle pool (no per-frame allocation).
+      this.hue = 0; this.breakTimer = 1.5; this._dt = 0;
+      const M = MAX_SHARDS;
+      this.sh = {
+        x: new Float32Array(M), y: new Float32Array(M), vx: new Float32Array(M), vy: new Float32Array(M),
+        rot: new Float32Array(M), vr: new Float32Array(M), life: new Float32Array(M), ml: new Float32Array(M),
+        size: new Float32Array(M), hue: new Float32Array(M), i: 0,
+      };
 
       this.shapes = catalogue(this.curSub);
       this.layers = this._layers(o, prng(this.seed));
@@ -255,16 +274,21 @@
         for (let k = 0, a = 0; k < ne; k++, a += 2) { fe[a] = geo.e[k][0]; fe[a+1] = geo.e[k][1]; }
         // "Sometimes fill some polygons" — a seeded subset of faces gets a
         // translucent, lit fill (drawn only when the quality tier allows it).
-        let fillFaces = null;
+        let fillFaces = null, fa = null, fst = null;
         if (rnd() < 0.62) {
           fillFaces = [];
           for (let fi = 0; fi < geo.f.length; fi++) if (rnd() < 0.6) fillFaces.push(fi);
-          if (!fillFaces.length) fillFaces = null;
+          if (fillFaces.length) {
+            fa = new Float32Array(fillFaces.length);      // per-face base alpha (varied)
+            fst = new Float32Array(fillFaces.length);     // 0 = solid ; >0 = seconds until reform
+            for (let q = 0; q < fa.length; q++) fa[q] = 0.35 + rnd() * 0.65;
+          } else fillFaces = null;
         }
+        const [ch, cs, cl] = rgbToHsl(col);
         out.push({
-          name, spd, fv, fe, nv, ne, col,
+          name, spd, fv, fe, nv, ne, col, h: ch, s: cs, l: cl, _col: col,
           proj: new Float64Array(nv * 2), rv: new Float64Array(nv * 3),
-          faces: geo.f, fillFaces,
+          faces: geo.f, fillFaces, fa, fst,
           sc: 1.5 * Math.pow(0.3, t), mInf: 0.6 + t * 0.35,
           lw: 0.6 + t * 1.3, la: 0.12 + t * 0.38, pa: 0.25 + t * 0.55,
           pr: 1.5 + t * 3, dots: i > 0,
@@ -312,11 +336,13 @@
       this._h = {
         mousemove: e => aim(e.clientX, e.clientY),
         touchmove: e => { if (e.touches[0]) { aim(e.touches[0].clientX, e.touches[0].clientY); e.preventDefault(); } },
+        pointerdown: e => this._click(e.clientX, e.clientY),
         resize: () => { this._dirty = true; },
         visibilitychange: () => { this.visible = !document.hidden; },
       };
       addEventListener('mousemove', this._h.mousemove);
       addEventListener('touchmove', this._h.touchmove, { passive: false });
+      addEventListener('pointerdown', this._h.pointerdown);
       addEventListener('resize', this._h.resize);
       document.addEventListener('visibilitychange', this._h.visibilitychange);
       this._io = new IntersectionObserver(([e]) => { this.visible = e.isIntersecting && !document.hidden; }, { threshold: 0 });
@@ -336,49 +362,139 @@
     // two-sided-lit, depth-sorted polygons, with an optional specular sheen
     // ("reflections"). Uses reusable typed scratch buffers — no per-frame GC.
     _fill(L) {
-      const { rv, proj, faces, fillFaces, col } = L, ctx = this.ctx, n = fillFaces.length;
+      const { rv, proj, faces, fillFaces, fa, fst, _col } = L, ctx = this.ctx, dt = this._dt, n = fillFaces.length;
       if (!this._fz || this._fz.length < n) {
         this._fz = new Float64Array(n); this._ford = new Int32Array(n);
         this._fin = new Float32Array(n); this._fsp = new Float32Array(n);
       }
       const fz = this._fz, ord = this._ford, fin = this._fin, fsp = this._fsp;
       for (let k = 0; k < n; k++) {
+        ord[k] = k;
+        if (fst[k] > 0) { fst[k] -= dt; if (fst[k] > 0) { fin[k] = -1; fz[k] = 1e9; continue; } } // shattered → reforming
         const face = faces[fillFaces[k]], a = face[0]*3, b = face[1]*3, c = face[2]*3;
         const e1x = rv[b]-rv[a], e1y = rv[b+1]-rv[a+1], e1z = rv[b+2]-rv[a+2];
         const e2x = rv[c]-rv[a], e2y = rv[c+1]-rv[a+1], e2z = rv[c+2]-rv[a+2];
         let nx = e1y*e2z - e1z*e2y, ny = e1z*e2x - e1x*e2z, nz = e1x*e2y - e1y*e2x;
         const nl = Math.hypot(nx, ny, nz) || 1; nx /= nl; ny /= nl; nz /= nl;
-        fin[k] = 0.22 + Math.abs(nx*LIGHT[0] + ny*LIGHT[1] + nz*LIGHT[2]) * 0.78;
+        fin[k] = fa[k] * (0.28 + Math.abs(nx*LIGHT[0] + ny*LIGHT[1] + nz*LIGHT[2]) * 0.72); // varied α × lighting
         if (this.specOn) { const h = Math.abs(nx*HALF[0] + ny*HALF[1] + nz*HALF[2]), h2 = h*h; fsp[k] = h2*h2*h2; }
         let z = 0; for (let j = 0; j < face.length; j++) z += rv[face[j]*3 + 2];
-        fz[k] = z / face.length; ord[k] = k;
+        fz[k] = z / face.length;
       }
       const view = ord.subarray(0, n);
       view.sort((p, q) => fz[p] - fz[q]);      // farthest first (back-to-front)
       for (let m = 0; m < n; m++) {
-        const k = view[m], face = faces[fillFaces[k]];
+        const k = view[m]; if (fin[k] < 0) continue;      // skip shattered faces
+        const face = faces[fillFaces[k]];
         ctx.beginPath();
         ctx.moveTo(proj[face[0]*2], proj[face[0]*2 + 1]);
         for (let j = 1; j < face.length; j++) ctx.lineTo(proj[face[j]*2], proj[face[j]*2 + 1]);
         ctx.closePath();
-        ctx.fillStyle = `rgba(${col},${0.05 + fin[k] * 0.13})`;
+        ctx.fillStyle = `rgba(${_col},${0.04 + fin[k] * 0.16})`;
         ctx.fill();
         if (this.specOn && fsp[k] > 0.03) { ctx.fillStyle = `rgba(255,255,255,${fsp[k] * 0.22})`; ctx.fill(); }
       }
+    }
+
+    // ── Shatter: click / spontaneous break → glass shards ─────────────────
+    // Point-in-polygon (screen space) against a face's last projected vertices.
+    _inFace(proj, face, px, py) {
+      let inside = false;
+      for (let i = 0, j = face.length - 1; i < face.length; j = i++) {
+        const xi = proj[face[i]*2], yi = proj[face[i]*2+1], xj = proj[face[j]*2], yj = proj[face[j]*2+1];
+        if (((yi > py) !== (yj > py)) && px < (xj - xi) * (py - yi) / (yj - yi) + xi) inside = !inside;
+      }
+      return inside;
+    }
+
+    // Click → shatter the front-most filled face under the pointer.
+    _click(cx, cy) {
+      if (!this.fillOn) return;                 // shatter only when resources allow fills
+      const r = this.canvas.getBoundingClientRect();
+      const px = (cx - r.left) * this.canvas.width / r.width, py = (cy - r.top) * this.canvas.height / r.height;
+      for (let li = this.activeCount - 1; li >= 0; li--) {          // inner (top) layers first
+        const L = this.layers[li];
+        if (!L.fillFaces) continue;
+        for (let k = 0; k < L.fillFaces.length; k++) {
+          if (L.fst[k] > 0) continue;
+          if (this._inFace(L.proj, L.faces[L.fillFaces[k]], px, py)) { this._break(L, k); return; }
+        }
+      }
+    }
+
+    // Pick a random living filled face and shatter it (the spontaneous "pops").
+    _breakRandom() {
+      const live = [];
+      for (let li = 0; li < this.activeCount; li++) if (this.layers[li].fillFaces) live.push(li);
+      if (!live.length) return;
+      const L = this.layers[live[(Math.random() * live.length) | 0]];
+      const k = (Math.random() * L.fillFaces.length) | 0;
+      if (L.fst[k] <= 0) this._break(L, k);
+    }
+
+    // Shatter face k of layer L: spawn iridescent shards from its centroid,
+    // then mark it gone for a few seconds (it reforms afterwards).
+    _break(L, k) {
+      const face = L.faces[L.fillFaces[k]], proj = L.proj;
+      let cx = 0, cy = 0;
+      for (let j = 0; j < face.length; j++) { cx += proj[face[j]*2]; cy += proj[face[j]*2+1]; }
+      cx /= face.length; cy /= face.length;
+      const count = (this.specOn ? 3 : 2) * face.length;
+      for (let s = 0; s < count; s++) this._spawnShard(cx, cy, (L.h + this.hue) % 360);
+      L.fst[k] = 2.5 + Math.random() * 4.5;     // reforms after 2.5–7 s
+    }
+
+    _spawnShard(x, y, hue) {
+      const S = this.sh, i = S.i++ % MAX_SHARDS, ang = Math.random() * 6.2832, spd = (30 + Math.random() * 170) * this.dpr;
+      S.x[i] = x; S.y[i] = y;
+      S.vx[i] = Math.cos(ang) * spd; S.vy[i] = Math.sin(ang) * spd - 30 * this.dpr;
+      S.rot[i] = Math.random() * 6.2832; S.vr[i] = (Math.random() - 0.5) * 10;
+      S.life[i] = S.ml[i] = 0.6 + Math.random() * 1.0;
+      S.size[i] = (3 + Math.random() * 8) * this.dpr;
+      S.hue[i] = hue + (Math.random() - 0.5) * 70;   // iridescent spread
+    }
+
+    // Update + draw all live shards (additive, iridescent, gravity-fed, fading).
+    _shards(dt) {
+      const S = this.sh, ctx = this.ctx, grav = 240 * this.dpr;
+      ctx.save(); ctx.globalCompositeOperation = 'lighter';
+      for (let i = 0; i < MAX_SHARDS; i++) {
+        if (S.life[i] <= 0) continue;
+        S.life[i] -= dt;
+        if (S.life[i] <= 0) continue;
+        S.vy[i] += grav * dt; S.x[i] += S.vx[i] * dt; S.y[i] += S.vy[i] * dt; S.rot[i] += S.vr[i] * dt;
+        const f = S.life[i] / S.ml[i], sz = S.size[i] * (0.5 + f * 0.5);
+        const hue = (S.hue[i] + this.hue * 2 + (1 - f) * 90) % 360;   // shifts as it flies (iridescence)
+        ctx.save();
+        ctx.translate(S.x[i], S.y[i]); ctx.rotate(S.rot[i]);
+        ctx.fillStyle = `rgba(${hsl((hue + 360) % 360, 95, 66)},${f * 0.75})`;
+        ctx.beginPath(); ctx.moveTo(0, -sz); ctx.lineTo(sz * 0.66, sz * 0.6); ctx.lineTo(-sz * 0.66, sz * 0.6); ctx.closePath();
+        ctx.fill();
+        ctx.restore();
+      }
+      ctx.restore();
     }
 
     _frame(now) {
       this.raf = requestAnimationFrame(this._loop);
       if (!this.visible) { this.last = 0; return; }
       if (!this.last) this.last = now;
-      const dt = now - this.last;
-      this.t += dt * 4e-6 * this.speed;
+      const dt = Math.min((now - this.last) / 1000, 0.1);  // seconds, clamped
+      this._dt = dt;
+      this.t += dt * 4e-3 * this.speed;
       this.last = now;
-      if (this.auto && dt > 0 && dt < 200) { // skip stalls / tab-wake spikes
-        this._fps += (1000 / dt - this._fps) * 0.05;
+      if (this.auto && dt > 0) {
+        this._fps += (1 / dt - this._fps) * 0.05;
         this._adapt();
       }
       if (this._dirty) { this.resize(); this._dirty = false; }
+
+      // Living glass: slow hue drift + spontaneous shatters (resource-gated).
+      this.hue = (this.hue + dt * 5) % 360;
+      if (this.fillOn) {
+        this.breakTimer -= dt;
+        if (this.breakTimer <= 0) { this._breakRandom(); this.breakTimer = 0.7 + Math.random() * 2.3; }
+      }
 
       const { ctx, R } = this, W = this.canvas.width, H = this.canvas.height;
       const hw = W / 2, hh = H / 2, fov = Math.min(W, H) * this.fov;
@@ -400,10 +516,12 @@
           const f = fov / (camZ - rz);      // perspective (–tz = camZ – rz)
           proj[b] = hw + rx * f; proj[b+1] = hh - ry * f;
         }
+        // Current colour = base hue drifted over time ("colours change").
+        L._col = hsl((L.h + this.hue) % 360, L.s, L.l);
         // Holographic pass: translucent, lit, depth-sorted faces (tier-gated).
         if (this.fillOn && L.fillFaces) this._fill(L);
         ctx.lineWidth = L.lw * this.dpr;
-        ctx.strokeStyle = `rgba(${L.col},${L.la})`;
+        ctx.strokeStyle = `rgba(${L._col},${L.la})`;
         ctx.beginPath();
         for (let i = 0, e = 0; i < ne; i++, e += 2) {
           const a = fe[e] << 1, b = fe[e+1] << 1;
@@ -415,6 +533,7 @@
           for (let i = 0, b = 0; i < nv; i++, b += 2) ctx.drawImage(s, proj[b] - h, proj[b+1] - h);
         }
       }
+      this._shards(dt);   // flying glass debris on top of everything
     }
 
     start()   { if (!this.raf) this.raf = requestAnimationFrame(this._loop); }
@@ -423,6 +542,7 @@
       this.stop();
       removeEventListener('mousemove', this._h.mousemove);
       removeEventListener('touchmove', this._h.touchmove);
+      removeEventListener('pointerdown', this._h.pointerdown);
       removeEventListener('resize', this._h.resize);
       document.removeEventListener('visibilitychange', this._h.visibilitychange);
       this._io?.disconnect();

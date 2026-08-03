@@ -10,9 +10,12 @@ Platonic solids as glowing nested wireframes, tilted by pointer movement.
 
 - **7 shapes** — icosahedron, octahedron, tetrahedron, cube, dodecahedron, and two geodesic spheres
 - **8 colour presets** + fully custom palettes
-- **Holographic faces** — a random subset of polygons fills translucently, with
-  two-sided lighting and specular "reflections" that sweep as the solids turn
-  (enabled only on capable hardware — see below)
+- **Holographic faces** — a random subset of polygons fills translucently (each
+  with its own transparency), with two-sided lighting and specular "reflections"
+  that sweep as the solids turn (enabled only on capable hardware — see below)
+- **Living glass** — **click a face to shatter it** into iridescent glass shards;
+  faces also pop and reform on their own over time, and the palette slowly drifts
+  — the figure never looks static
 - **Seeded generative mode** — `?random` picks a seed you can permalink and reproduce
 - **Pointer & touch** driven rotation with smooth easing
 - **Adaptive quality** — probes the device and continuously watches the frame
