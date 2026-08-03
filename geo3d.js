@@ -301,25 +301,34 @@
     }
   }
 
-  /* ── Auto-init from URL query ──────────────────────────────────────────── */
-  const fromURL = () => {
-    const p = new URLSearchParams(location.search), o = {}, has = k => p.has(k);
+  /* ── Options from a key→value source (URL query or canvas dataset) ─────────
+     `has(k)`/`get(k)` abstract the source so the same parser serves both. */
+  const readOpts = (has, get) => {
+    const o = {};
     if (has('random')) o.random = true;
-    if (has('seed')) o.seed = parseInt(p.get('seed'), 10);
-    if (has('preset')) o.preset = p.get('preset');
-    if (has('colors')) o.colors = p.get('colors').split(';');
-    if (has('shapes')) o.shapes = p.get('shapes').split(',');
-    if (has('speed')) o.speed = p.get('speed');
-    if (has('layers')) o.layers = parseInt(p.get('layers'), 10);
-    if (has('bg')) o.background = '#' + p.get('bg');
-    if (has('background')) o.background = p.get('background');
-    for (const k of ['breathe', 'fov', 'camera', 'mouse']) if (has(k)) o[k] = parseFloat(p.get(k));
-    if (has('subdivisions')) o.subdivisions = parseInt(p.get('subdivisions'), 10);
+    if (has('seed')) o.seed = parseInt(get('seed'), 10);
+    if (has('preset')) o.preset = get('preset');
+    if (has('colors')) o.colors = get('colors').split(';');
+    if (has('shapes')) o.shapes = get('shapes').split(',');
+    if (has('speed')) o.speed = get('speed');
+    if (has('layers')) o.layers = parseInt(get('layers'), 10);
+    if (has('bg')) o.background = '#' + get('bg');
+    if (has('background')) o.background = get('background');
+    for (const k of ['breathe', 'fov', 'camera', 'mouse']) if (has(k)) o[k] = parseFloat(get(k));
+    if (has('subdivisions')) o.subdivisions = parseInt(get('subdivisions'), 10);
     return o;
   };
+
+  // Auto-init from `data-*` attributes (CSP-friendly — no inline script needed)
+  // overridden by the URL query string (more specific / user-driven).
   const init = () => {
     const c = document.querySelector('canvas#geo, canvas[data-geo3d]');
-    if (c && !c._geo3d) c._geo3d = new Geo3D(c, fromURL());
+    if (!c || c._geo3d) return;
+    const d = c.dataset, p = new URLSearchParams(location.search);
+    c._geo3d = new Geo3D(c, {
+      ...readOpts(k => k in d, k => d[k]),
+      ...readOpts(k => p.has(k), k => p.get(k)),
+    });
   };
   if (document.readyState === 'loading') addEventListener('DOMContentLoaded', init);
   else init();
