@@ -1,78 +1,88 @@
 # geo3d
 
-Lightweight 3D wireframe geometry animation. Three nested polyhedra rotating in a canvas, driven by mouse movement. Zero dependencies.
+Animated nested wireframe polyhedra on a 2D canvas — geodesic spheres and
+Platonic solids as glowing nested wireframes, tilted by pointer movement.
+**Zero dependencies, no build step, ~4 KB.**
 
-![demo](https://img.shields.io/badge/demo-live-6c63ff?style=flat-square)
+**[▶ Live demo](https://yrbane.github.io/geo3d/)** · **[🎲 Random](https://yrbane.github.io/geo3d/?random)** · **[🔥 fire ×4](https://yrbane.github.io/geo3d/?preset=fire&layers=4)** · **[🟢 matrix](https://yrbane.github.io/geo3d/?preset=matrix&bg=000000)**
 
-**[Live demo](https://yrbane.github.io/geo3d/)**
+## Features
 
-## What it does
+- **7 shapes** — icosahedron, octahedron, tetrahedron, cube, dodecahedron, and two geodesic spheres
+- **8 colour presets** + fully custom palettes
+- **Seeded generative mode** — `?random` picks a seed you can permalink and reproduce
+- **Pointer & touch** driven rotation with smooth easing
+- **Retina-crisp** (device-pixel-ratio aware), pauses off-screen / in background tab, respects `prefers-reduced-motion`
+- Configurable by **URL query** *or* a **programmatic API**
 
-Renders three nested wireframe polyhedra with Canvas 2D and manual 3D projection:
-
-| Layer | Shape | Vertices | Edges | Color |
-|-------|-------|----------|-------|-------|
-| Outer | Geodesic sphere (subdivided icosahedron) | 42 | 120 | Purple |
-| Middle | Icosahedron | 12 | 30 | Cyan |
-| Inner | Octahedron | 6 | 12 | Red |
-
-Each layer rotates on 3 axes at different speeds. Mouse movement tilts the assembly with smooth interpolation.
-
-## Performance
-
-Optimized for 60fps on modest hardware:
-
-- **Pre-rendered glow sprites** on offscreen canvas (zero gradient allocation per frame)
-- **Float64Array** for vertices and projection buffers (cache-friendly, zero GC)
-- **Analytically composed rotation matrix** Rz * Rx * Ry in one pass (no intermediate matrix multiply)
-- **IntersectionObserver** pauses rendering when off-screen
-- **Timestamp-based animation** for frame-rate independence
-
-Total per frame: 162 edge draw ops + 18 sprite blits.
-
-## Usage
+## Quick start
 
 ```html
-<canvas id="geo" style="width:500px;height:500px"></canvas>
+<canvas id="geo"></canvas>
 <script src="geo3d.js"></script>
 ```
 
-Or just open `index.html`.
+The script auto-initialises the first `<canvas id="geo">` (or any
+`<canvas data-geo3d>`) and reads its options from the page's `?query` string.
 
-## Configuration
+## Programmatic API
 
-Edit the `CONFIG` object and `layerDefs` array at the top of the script:
+```js
+const anim = new Geo3D(canvas, { preset: 'fire', layers: 4, shapes: ['dodec', 'ico'] });
 
-```javascript
-var CONFIG = {
-  cameraZ: 3.5,        // camera distance
-  fovFactor: 0.9,      // field-of-view
-  mouseSmooth: 0.035,   // mouse lerp (lower = smoother)
-  breathe: 0.04,       // outer layer pulsation
-  subdivisions: 1,     // 1 = 42 vertices, 2 = 162 vertices
-};
-
-// Per layer: scale, speed, color, line width, opacity...
-var layerDefs = [
-  { sc:1.5, spd:[.5,.35,.2], col:'108,99,255', ... },
-  ...
-];
+anim.stop();      // pause
+anim.start();     // resume
+anim.destroy();   // remove listeners + observers
+anim.info;        // e.g. "4L · fire · dodec+ico+dodec+ico"
+anim.seed;        // uint32 seed (reproduce a ?random run)
 ```
 
-## Advanced version
+## Options
 
-A richer, URL-configurable build lives in [`geo3d/`](geo3d/): 7 shapes
-(`ico` `oct` `tet` `cube` `dodec` `geo1` `geo2`), 8 color presets
-(`default` `neon` `fire` `ice` `pastel` `mono` `gold` `matrix`), a `?random`
-mode, touch support, and 11 URL parameters (`preset`, `layers`, `shapes`,
-`speed`, `bg`, `breathe`, `subdivisions`, `fov`, `camera`, `mouse`). See
-[`geo3d/README.md`](geo3d/README.md) for the full parameter reference.
+Every option is also accepted as a URL query parameter on the auto-init canvas.
+
+| Option | Values | Default |
+|--------|--------|---------|
+| `shapes` | `array` or `a,b,c` (cycled per layer) | `geo1,ico,oct,tet,cube,dodec` |
+| `preset` | preset name or `['r,g,b', …]` | `default` |
+| `colors` | explicit `['r,g,b', …]` (query: `r,g,b;r,g,b`) | — |
+| `layers` | `1`–`6` | `3` |
+| `speed` | `slow` `normal` `fast` `insane` or a number | `normal` |
+| `background` / `bg` | `#rrggbb` (bare hex via `?bg=`) | transparent |
+| `breathe` | `0`–`1` (outer pulsation) | `0.04` |
+| `subdivisions` | `0`–`3` (geodesic detail) | `1` |
+| `fov` | `0.3`–`2` | `0.9` |
+| `camera` | `1.5`–`8` | `3.5` |
+| `mouse` | `0`–`1` (higher = snappier) | `0.035` |
+| `random` | flag | off |
+| `seed` | uint32 | auto |
 
 ```
-geo3d/?random
-geo3d/?preset=fire&layers=4
-geo3d/?shapes=cube,dodec&preset=neon
+?random
+?preset=fire&layers=4
+?shapes=dodec,cube&preset=neon&speed=fast
+?preset=matrix&bg=000000&subdivisions=2
+?seed=1234567890          # reproduce a random you liked
 ```
+
+**Shapes:** `ico` `oct` `tet` `cube` `dodec` `geo1` `geo2`
+**Presets:** `default` `neon` `fire` `ice` `pastel` `mono` `gold` `matrix`
+
+## How it works
+
+Wireframes are rendered with Canvas 2D and a hand-rolled 3D pipeline, tuned for
+a steady 60 fps on modest hardware:
+
+- **Typed arrays** (`Float64Array` / `Uint16Array`) for vertices, edges and
+  projections — cache-friendly, zero per-frame allocation.
+- **Rotation matrix composed analytically** (`Rz·Rx·Ry` in a single trig pass,
+  no intermediate matrix multiply).
+- **Pre-rendered glow sprites** on an offscreen canvas — no gradient allocated
+  per frame; vertices are blitted, not redrawn.
+- **Batched stroke path** — one `beginPath`/`stroke` per layer.
+- **`IntersectionObserver` + `visibilitychange`** pause rendering when the
+  canvas is off-screen or the tab is hidden.
+- **Timestamp-based** animation, so speed is frame-rate independent.
 
 ## License
 

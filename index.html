@@ -2,27 +2,52 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>geo3d — Nested Wireframe Polyhedra</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>geo3d — nested wireframe polyhedra</title>
+<meta name="description" content="Animated nested wireframe polyhedra on a 2D canvas. Zero dependencies.">
 <style>
   *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
   body {
     background: #06060b;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    min-height: 100vh;
+    display: grid;
+    place-items: center;
     overflow: hidden;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font: 11px/1.6 'SF Mono', 'Fira Code', ui-monospace, monospace;
+    color: #fff;
   }
-  canvas {
-    width: min(90vw, 90vh);
-    height: min(90vw, 90vh);
+  canvas { width: min(92vmin, 900px); height: min(92vmin, 900px); display: block; }
+  #info {
+    position: fixed;
+    bottom: 14px;
+    right: 18px;
+    text-align: right;
+    color: rgba(255, 255, 255, 0.4);
+    transition: opacity 0.6s ease;
   }
+  #info a {
+    color: rgba(255, 255, 255, 0.55);
+    text-decoration: none;
+    border-bottom: 1px dotted rgba(255, 255, 255, 0.25);
+  }
+  #info a:hover { color: #fff; }
 </style>
 </head>
 <body>
-<canvas id="geo"></canvas>
-<script src="geo3d.js"></script>
+  <canvas id="geo"></canvas>
+  <div id="info"></div>
+
+  <script src="geo3d.js"></script>
+  <script>
+    // Tiny overlay: show the active layout + a reproducible-random permalink.
+    addEventListener('DOMContentLoaded', () => {
+      const g = document.getElementById('geo')._geo3d, el = document.getElementById('info');
+      if (!g || !el) return;
+      el.innerHTML = `${g.info}<br><a href="?random">↻ random</a> · <a href="?seed=${g.seed}">permalink</a>`;
+      let t = setTimeout(() => (el.style.opacity = 0), 3500);
+      el.onmouseenter = () => { clearTimeout(t); el.style.opacity = 1; };
+      el.onmouseleave = () => (t = setTimeout(() => (el.style.opacity = 0), 1500));
+    });
+  </script>
 </body>
 </html>
