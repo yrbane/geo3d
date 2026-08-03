@@ -59,6 +59,21 @@ var layerDefs = [
 ];
 ```
 
+## Advanced version
+
+A richer, URL-configurable build lives in [`geo3d/`](geo3d/): 7 shapes
+(`ico` `oct` `tet` `cube` `dodec` `geo1` `geo2`), 8 color presets
+(`default` `neon` `fire` `ice` `pastel` `mono` `gold` `matrix`), a `?random`
+mode, touch support, and 11 URL parameters (`preset`, `layers`, `shapes`,
+`speed`, `bg`, `breathe`, `subdivisions`, `fov`, `camera`, `mouse`). See
+[`geo3d/README.md`](geo3d/README.md) for the full parameter reference.
+
+```
+geo3d/?random
+geo3d/?preset=fire&layers=4
+geo3d/?shapes=cube,dodec&preset=neon
+```
+
 ## License
 
 MIT
