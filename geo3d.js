@@ -189,7 +189,7 @@
     reform: 5,            // base seconds a shattered face stays gone before reforming
     bounce: 'auto',       // shards bounce off the outer layer: 'auto' (ultra) | true | false
     hueDrift: 5,          // colour drift, degrees/second
-    shardLife: 1.3,       // base shard lifetime, seconds
+    shardLife: 6,         // shard safety max-age seconds (they mostly fall off-screen first)
   };
 
   /* ── Engine ────────────────────────────────────────────────────────────── */
@@ -232,7 +232,7 @@
       this.reformBase = Math.max(0.5, +o.reform || 5);
       this.bounceOpt = o.bounce;                       // 'auto' | true | false
       this.hueRate = o.hueDrift == null ? 5 : +o.hueDrift;
-      this.shardLifeBase = Math.max(0.2, +o.shardLife || 1.3);
+      this.shardTTL = clamp(+o.shardLife || 6, 1, 30);   // safety max age; shards mostly die off the bottom
       this.hue = 0; this._dt = 0;
       this.breakTimer = this.breakInterval * (0.5 + Math.random());
       // Reusable shard pool — each shard is a triangular glass piece of a face
@@ -243,6 +243,7 @@
         rot: new Float32Array(M), vr: new Float32Array(M), life: new Float32Array(M), ml: new Float32Array(M), hue: new Float32Array(M),
         ax: new Float32Array(M), ay: new Float32Array(M), bx: new Float32Array(M), by: new Float32Array(M), cx: new Float32Array(M), cy: new Float32Array(M),
         gen: new Float32Array(M),   // remaining re-break generations (splits on bounce)
+        bri: new Float32Array(M),   // colour intensity, dimmed on each bounce
         i: 0,
       };
 
@@ -354,12 +355,14 @@
         mousemove: e => aim(e.clientX, e.clientY),
         touchmove: e => { if (e.touches[0]) { aim(e.touches[0].clientX, e.touches[0].clientY); e.preventDefault(); } },
         pointerdown: e => this._click(e.clientX, e.clientY),
+        dblclick: () => this._explodeAll(),
         resize: () => { this._dirty = true; },
         visibilitychange: () => { this.visible = !document.hidden; },
       };
       addEventListener('mousemove', this._h.mousemove);
       addEventListener('touchmove', this._h.touchmove, { passive: false });
       addEventListener('pointerdown', this._h.pointerdown);
+      addEventListener('dblclick', this._h.dblclick);
       addEventListener('resize', this._h.resize);
       document.addEventListener('visibilitychange', this._h.visibilitychange);
       this._io = new IntersectionObserver(([e]) => { this.visible = e.isIntersecting && !document.hidden; }, { threshold: 0 });
@@ -449,6 +452,16 @@
       if (L.fst[k] <= 0) this._break(L, k);
     }
 
+    // Double-click → shatter every solid filled face at once (big burst).
+    _explodeAll() {
+      if (!this.shatterOn || !this.fillOn) return;
+      for (let li = 0; li < this.activeCount; li++) {
+        const L = this.layers[li];
+        if (!L.fillFaces) continue;
+        for (let k = 0; k < L.fillFaces.length; k++) if (L.fst[k] <= 0) this._break(L, k);
+      }
+    }
+
     // Shatter face k of L: split its projected polygon into real triangular
     // pieces (fan, then centre-split at ultra) — so shards vary in size and
     // together cover the face's surface — and fling them out from the centre.
@@ -474,12 +487,12 @@
     }
 
     // Low-level: write a triangular shard (screen coords) into slot idx.
-    _writeShard(idx, x1, y1, x2, y2, x3, y3, vx, vy, gen, hue, life) {
+    _writeShard(idx, x1, y1, x2, y2, x3, y3, vx, vy, gen, hue, life, bri) {
       const S = this.sh, cx = (x1+x2+x3) / 3, cy = (y1+y2+y3) / 3;
       S.x[idx] = cx; S.y[idx] = cy;
       S.ax[idx] = x1-cx; S.ay[idx] = y1-cy; S.bx[idx] = x2-cx; S.by[idx] = y2-cy; S.cx[idx] = x3-cx; S.cy[idx] = y3-cy;
       S.vx[idx] = vx; S.vy[idx] = vy; S.rot[idx] = 0; S.vr[idx] = (Math.random()-0.5) * 8;
-      S.life[idx] = S.ml[idx] = life; S.hue[idx] = hue; S.gen[idx] = gen;
+      S.life[idx] = S.ml[idx] = life; S.hue[idx] = hue; S.gen[idx] = gen; S.bri[idx] = bri;
     }
 
     // A fresh piece flung outward from the face centre (fcx,fcy).
@@ -489,7 +502,7 @@
       const spd = (35 + Math.random() * 135) * this.dpr, jt = 55 * this.dpr;
       this._writeShard(this.sh.i++ % MAX_SHARDS, x1, y1, x2, y2, x3, y3,
         dx*spd + (Math.random()-0.5)*jt, dy*spd + (Math.random()-0.5)*jt - 25*this.dpr,
-        this.specOn ? 2 : 1, hue + (Math.random()-0.5) * 70, this.shardLifeBase * (0.6 + Math.random() * 0.8));
+        this.specOn ? 2 : 1, hue + (Math.random()-0.5) * 70, this.shardTTL, 1);
     }
 
     // Re-break shard i on bounce into a RANDOM but physically coherent number
@@ -503,7 +516,7 @@
       const Ax = S.x[i]+S.ax[i], Ay = S.y[i]+S.ay[i], Bx = S.x[i]+S.bx[i], By = S.y[i]+S.by[i], Cx = S.x[i]+S.cx[i], Cy = S.y[i]+S.cy[i];
       if (Math.abs((Bx-Ax)*(Cy-Ay) - (Cx-Ax)*(By-Ay)) * 0.5 < 22 * this.dpr * this.dpr) return; // too small
       const vx = S.vx[i], vy = S.vy[i], sp = Math.hypot(vx, vy);
-      const gen = S.gen[i] - 1, hue = S.hue[i], life = Math.max(S.life[i] * 0.85, this.shardLifeBase * 0.4);
+      const gen = S.gen[i] - 1, hue = S.hue[i], bri = S.bri[i], life = this.shardTTL;
 
       if (Math.random() < 0.4) {                    // simple 2-way cut along the longest edge
         const dAB = (Ax-Bx)**2+(Ay-By)**2, dBC = (Bx-Cx)**2+(By-Cy)**2, dCA = (Cx-Ax)**2+(Cy-Ay)**2;
@@ -512,8 +525,8 @@
         else if (dBC >= dCA)          { px = Ax; py = Ay; q1x = Bx; q1y = By; q2x = Cx; q2y = Cy; }
         else                          { px = Bx; py = By; q1x = Cx; q1y = Cy; q2x = Ax; q2y = Ay; }
         const mx = (q1x+q2x)/2, my = (q1y+q2y)/2, vl = sp || 1, nx = -vy/vl, ny = vx/vl, kick = (20 + Math.random()*45) * this.dpr;
-        this._writeShard(i, px, py, q1x, q1y, mx, my, vx + nx*kick, vy + ny*kick, gen, hue, life);
-        this._writeShard(this.sh.i++ % MAX_SHARDS, px, py, mx, my, q2x, q2y, vx - nx*kick, vy - ny*kick, gen, hue, life);
+        this._writeShard(i, px, py, q1x, q1y, mx, my, vx + nx*kick, vy + ny*kick, gen, hue, life, bri);
+        this._writeShard(this.sh.i++ % MAX_SHARDS, px, py, mx, my, q2x, q2y, vx - nx*kick, vy - ny*kick, gen, hue, life, bri);
         return;
       }
 
@@ -539,21 +552,22 @@
         let dx = tcx-Px, dy = tcy-Py; const dl = Math.hypot(dx, dy) || 1;
         const idx = j === 0 ? i : this.sh.i++ % MAX_SHARDS;   // reuse slot i for the first piece
         this._writeShard(idx, Px, Py, px[j], py[j], px[n], py[n],
-          vx + dx/dl*div, vy + dy/dl*div, gen, hue + (Math.random()-0.5)*30, life * (0.8 + Math.random()*0.4));
+          vx + dx/dl*div, vy + dy/dl*div, gen, hue + (Math.random()-0.5)*30, life, bri);
       }
     }
 
     // Update + draw live shards: gravity, optional bounce off the OUTER layer's
     // facets (its projected edges), additive iridescent triangles fading out.
     _shards(dt) {
-      const S = this.sh, ctx = this.ctx, grav = 460 * this.dpr;   // strong gravity → shards fall well down
+      const S = this.sh, ctx = this.ctx, grav = 460 * this.dpr;   // strong gravity → shards fall to the bottom
+      const H = this.canvas.height, floor = H + 40 * this.dpr;
       const bounce = this.shatterOn && (this.bounceOpt === 'auto' ? this.specOn : this.bounceOpt === true && this.fillOn);
       const L0 = bounce && this.activeCount ? this.layers[0] : null;
       const ep = L0 && L0.proj, ee = L0 && L0.fe, en = L0 ? L0.ne : 0;
       ctx.save(); ctx.globalCompositeOperation = 'lighter';
       for (let i = 0; i < MAX_SHARDS; i++) {
         if (S.life[i] <= 0) continue;
-        S.life[i] -= dt;
+        S.life[i] -= dt;                          // safety age cap (they usually exit the bottom first)
         if (S.life[i] <= 0) continue;
         S.vy[i] += grav * dt;
         const px = S.x[i], py = S.y[i]; let nx = px + S.vx[i]*dt, ny = py + S.vy[i]*dt, bounced = false;
@@ -573,12 +587,13 @@
           }
         }
         S.x[i] = nx; S.y[i] = ny; S.rot[i] += S.vr[i] * dt;
-        if (bounced) this._splitShard(i);         // re-break into smaller pieces on each bounce
-        const f = S.life[i] / S.ml[i];
-        const hue = ((S.hue[i] + this.hue*2 + (1-f)*90) % 360 + 360) % 360;   // iridescence
+        if (bounced) { S.bri[i] *= 0.72; this._splitShard(i); }   // each bounce dims the colour + re-breaks
+        if (ny > floor || S.bri[i] < 0.05) { S.life[i] = 0; continue; }   // fell off the bottom / faded out
+        const bri = S.bri[i];
+        const hue = ((S.hue[i] + this.hue*2 + (1-bri)*120) % 360 + 360) % 360;   // iridescence shifts as it dims
         ctx.save();
-        ctx.translate(S.x[i], S.y[i]); ctx.rotate(S.rot[i]);
-        ctx.fillStyle = `rgba(${hsl(hue, 95, 66)},${f * 0.7})`;
+        ctx.translate(nx, ny); ctx.rotate(S.rot[i]);
+        ctx.fillStyle = `rgba(${hsl(hue, 95, 66)},${bri * 0.75})`;
         ctx.beginPath(); ctx.moveTo(S.ax[i], S.ay[i]); ctx.lineTo(S.bx[i], S.by[i]); ctx.lineTo(S.cx[i], S.cy[i]); ctx.closePath();
         ctx.fill();
         ctx.restore();
@@ -654,6 +669,7 @@
       removeEventListener('mousemove', this._h.mousemove);
       removeEventListener('touchmove', this._h.touchmove);
       removeEventListener('pointerdown', this._h.pointerdown);
+      removeEventListener('dblclick', this._h.dblclick);
       removeEventListener('resize', this._h.resize);
       document.removeEventListener('visibilitychange', this._h.visibilitychange);
       this._io?.disconnect();

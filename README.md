@@ -13,10 +13,12 @@ Platonic solids as glowing nested wireframes, tilted by pointer movement.
 - **Holographic faces** — a random subset of polygons fills translucently (each
   with its own transparency), with two-sided lighting and specular "reflections"
   that sweep as the solids turn (enabled only on capable hardware — see below)
-- **Living glass** — **click a face to shatter it** into iridescent shards that
-  are the face's own triangulated pieces (varied sizes, matching its surface) and
-  **bounce off the outer shell's facets**; faces also pop and reform on their own,
-  and the palette slowly drifts — the figure never looks static. Fully tunable.
+- **Living glass** — **click a face to shatter it** (or **double-click to blow up
+  every face at once**) into iridescent shards that are the face's own triangulated
+  pieces (varied sizes, matching its surface). They **bounce off the outer shell's
+  facets**, **re-break into a random number of smaller pieces** and **dim a little
+  on each bounce**, then **fall off the bottom of the screen** under gravity. Faces
+  also pop and reform on their own, and the palette slowly drifts. Fully tunable.
 - **Seeded generative mode** — `?random` picks a seed you can permalink and reproduce
 - **Pointer & touch** driven rotation with smooth easing
 - **Adaptive quality** — probes the device and continuously watches the frame
@@ -71,7 +73,7 @@ Every option is also accepted as a URL query parameter on the auto-init canvas.
 | `reform` | seconds a shattered face stays gone | `5` |
 | `bounce` | shards bounce off the outer shell — `auto` (ultra) · `true` · `false` | `auto` |
 | `hueDrift` | palette drift, degrees/second | `5` |
-| `shardLife` | shard lifetime, seconds | `1.3` |
+| `shardLife` | shard safety max-age, seconds (they usually fall off-screen first) | `6` |
 
 ```
 ?random
