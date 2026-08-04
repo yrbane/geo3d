@@ -265,8 +265,12 @@
       this.shapes = catalogue(this.curSub);
       this.layers = this._layers(o, prng(this.seed));
       this.activeCount = Math.min(this.layers.length, TIERS[lvl].layers);
+      // `o.preset` may come straight from the URL (`?preset=`); only ever
+      // echo it back verbatim when it's one of the known keys, else 'custom'
+      // — same reasoning as the shape name above.
       this.info = `${this.activeCount}L · ${this.random ? 'random#' + this.seed
-        : Array.isArray(o.preset) || Array.isArray(o.colors) ? 'custom' : o.preset} · ${this.layers.slice(0, this.activeCount).map(l => l.name).join('+')}`;
+        : Array.isArray(o.preset) || Array.isArray(o.colors) ? 'custom'
+        : PRESETS[o.preset] ? o.preset : 'custom'} · ${this.layers.slice(0, this.activeCount).map(l => l.name).join('+')}`;
       this._fps = 60; this._cooldown = 60;
 
       this.R = new Float64Array(9);
@@ -300,7 +304,12 @@
           col = palette[i % palette.length];
           spd = [sign * (0.5 + t * 0.8), sign * -(0.35 + t * 0.55), sign * (0.2 + t * 0.5)];
         }
-        const geo = this.shapes[name] || this.shapes.ico, nv = geo.v.length, ne = geo.e.length;
+        // `name` may come straight from the URL (`?shapes=`); fall back to
+        // 'ico' both for the geometry lookup AND the displayed name, so an
+        // arbitrary string can never reach `info` (which index.html injects
+        // via innerHTML).
+        if (!Object.prototype.hasOwnProperty.call(this.shapes, name)) name = 'ico';
+        const geo = this.shapes[name], nv = geo.v.length, ne = geo.e.length;
         const fv = new Float64Array(nv * 3);
         for (let k = 0, a = 0; k < nv; k++, a += 3) { fv[a] = geo.v[k][0]; fv[a+1] = geo.v[k][1]; fv[a+2] = geo.v[k][2]; }
         const fe = new Uint16Array(ne * 2);

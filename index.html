@@ -44,7 +44,10 @@
     addEventListener('DOMContentLoaded', () => {
       const g = document.getElementById('geo')._geo3d, el = document.getElementById('info');
       if (!g || !el) return;
-      el.innerHTML = `<span id="q"></span>${g.info}<br><a href="?random">↻ random</a> · <a href="?seed=${g.seed}">permalink</a>`;
+      // g.info/g.seed are attacker-influenced (URL query) upstream data —
+      // escape before innerHTML even though geo3d.js already whitelists them.
+      const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+      el.innerHTML = `<span id="q"></span>${esc(g.info)}<br><a href="?random">↻ random</a> · <a href="?seed=${esc(g.seed)}">permalink</a>`;
       const q = document.getElementById('q');
       setInterval(() => (q.textContent = `Q${g.level}${g.auto ? '~' : ''} · `), 800);
       let t = setTimeout(() => (el.style.opacity = 0), 3500);
