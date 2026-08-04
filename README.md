@@ -15,8 +15,7 @@ Platonic solids as glowing nested wireframes, tilted by pointer movement.
   that sweep as the solids turn (enabled only on capable hardware — see below)
 - **Living glass** — **click a face to shatter it** (or **double-click to blow up
   every face at once**) into iridescent shards that are the face's own triangulated
-  pieces (varied sizes, matching its surface). They **bounce off the outer shell's
-  facets**, **re-break into a random number of smaller pieces** and **dim a little
+  pieces (varied sizes, matching its surface). They **bounce off the larger geodes that enclose them** (proper 3D nesting — never off the smaller ones inside), **re-break into a random number of smaller pieces** and **dim a little
   on each bounce**, then **fall off the bottom of the screen** under gravity. Faces
   also pop and reform on their own, and the palette slowly drifts. Fully tunable.
 - **Seeded generative mode** — `?random` picks a seed you can permalink and reproduce
@@ -71,7 +70,7 @@ Every option is also accepted as a URL query parameter on the auto-init canvas.
 | `shatter` | flag (`0`/`false` to disable) | on |
 | `breakInterval` | avg seconds between spontaneous shatters | `6` |
 | `reform` | seconds a shattered face stays gone | `5` |
-| `bounce` | shards bounce off the outer shell — `auto` (ultra) · `true` · `false` | `auto` |
+| `bounce` | shards bounce off the bigger enclosing geodes (3D nesting) — `auto` (ultra) · `true` · `false` | `auto` |
 | `hueDrift` | palette drift, degrees/second | `5` |
 | `shardLife` | shard safety max-age, seconds (they usually fall off-screen first) | `6` |
 

@@ -244,6 +244,7 @@
         ax: new Float32Array(M), ay: new Float32Array(M), bx: new Float32Array(M), by: new Float32Array(M), cx: new Float32Array(M), cy: new Float32Array(M),
         gen: new Float32Array(M),   // remaining re-break generations (splits on bounce)
         bri: new Float32Array(M),   // colour intensity, dimmed on each bounce
+        src: new Float32Array(M),   // source layer index (bounces only off bigger/outer shells)
         i: 0,
       };
 
@@ -304,7 +305,7 @@
         }
         const [ch, cs, cl] = rgbToHsl(col);
         out.push({
-          name, spd, fv, fe, nv, ne, col, h: ch, s: cs, l: cl, _col: col,
+          name, spd, fv, fe, nv, ne, col, h: ch, s: cs, l: cl, _col: col, idx: i, _R: 0,
           proj: new Float64Array(nv * 2), rv: new Float64Array(nv * 3),
           faces: geo.f, fillFaces, fa, fst,
           sc: 1.5 * Math.pow(0.3, t), mInf: 0.6 + t * 0.35,
@@ -471,38 +472,38 @@
       let fcx = 0, fcy = 0;
       for (let j = 0; j < face.length; j++) { fcx += proj[face[j]*2]; fcy += proj[face[j]*2+1]; }
       fcx /= face.length; fcy /= face.length;
-      const x0 = proj[face[0]*2], y0 = proj[face[0]*2+1];
+      const x0 = proj[face[0]*2], y0 = proj[face[0]*2+1], src = L.idx;
       for (let j = 1; j < face.length - 1; j++) {
         const x1 = proj[face[j]*2], y1 = proj[face[j]*2+1], x2 = proj[face[j+1]*2], y2 = proj[face[j+1]*2+1];
         if (this.specOn) {                       // finer shatter: centre-split each triangle
           const tx = (x0+x1+x2)/3, ty = (y0+y1+y2)/3;
-          this._piece(x0, y0, x1, y1, tx, ty, fcx, fcy, hue);
-          this._piece(x1, y1, x2, y2, tx, ty, fcx, fcy, hue);
-          this._piece(x2, y2, x0, y0, tx, ty, fcx, fcy, hue);
+          this._piece(x0, y0, x1, y1, tx, ty, fcx, fcy, hue, src);
+          this._piece(x1, y1, x2, y2, tx, ty, fcx, fcy, hue, src);
+          this._piece(x2, y2, x0, y0, tx, ty, fcx, fcy, hue, src);
         } else {
-          this._piece(x0, y0, x1, y1, x2, y2, fcx, fcy, hue);
+          this._piece(x0, y0, x1, y1, x2, y2, fcx, fcy, hue, src);
         }
       }
       L.fst[k] = this.reformBase * (0.7 + Math.random() * 0.9);
     }
 
     // Low-level: write a triangular shard (screen coords) into slot idx.
-    _writeShard(idx, x1, y1, x2, y2, x3, y3, vx, vy, gen, hue, life, bri) {
+    _writeShard(idx, x1, y1, x2, y2, x3, y3, vx, vy, gen, hue, life, bri, src) {
       const S = this.sh, cx = (x1+x2+x3) / 3, cy = (y1+y2+y3) / 3;
       S.x[idx] = cx; S.y[idx] = cy;
       S.ax[idx] = x1-cx; S.ay[idx] = y1-cy; S.bx[idx] = x2-cx; S.by[idx] = y2-cy; S.cx[idx] = x3-cx; S.cy[idx] = y3-cy;
       S.vx[idx] = vx; S.vy[idx] = vy; S.rot[idx] = 0; S.vr[idx] = (Math.random()-0.5) * 8;
-      S.life[idx] = S.ml[idx] = life; S.hue[idx] = hue; S.gen[idx] = gen; S.bri[idx] = bri;
+      S.life[idx] = S.ml[idx] = life; S.hue[idx] = hue; S.gen[idx] = gen; S.bri[idx] = bri; S.src[idx] = src;
     }
 
     // A fresh piece flung outward from the face centre (fcx,fcy).
-    _piece(x1, y1, x2, y2, x3, y3, fcx, fcy, hue) {
+    _piece(x1, y1, x2, y2, x3, y3, fcx, fcy, hue, src) {
       const cx = (x1+x2+x3) / 3, cy = (y1+y2+y3) / 3;
       let dx = cx-fcx, dy = cy-fcy; const dl = Math.hypot(dx, dy) || 1; dx /= dl; dy /= dl;
       const spd = (35 + Math.random() * 135) * this.dpr, jt = 55 * this.dpr;
       this._writeShard(this.sh.i++ % MAX_SHARDS, x1, y1, x2, y2, x3, y3,
         dx*spd + (Math.random()-0.5)*jt, dy*spd + (Math.random()-0.5)*jt - 25*this.dpr,
-        this.specOn ? 2 : 1, hue + (Math.random()-0.5) * 70, this.shardTTL, 1);
+        this.specOn ? 2 : 1, hue + (Math.random()-0.5) * 70, this.shardTTL, 1, src);
     }
 
     // Re-break shard i on bounce into a RANDOM but physically coherent number
@@ -516,7 +517,7 @@
       const Ax = S.x[i]+S.ax[i], Ay = S.y[i]+S.ay[i], Bx = S.x[i]+S.bx[i], By = S.y[i]+S.by[i], Cx = S.x[i]+S.cx[i], Cy = S.y[i]+S.cy[i];
       if (Math.abs((Bx-Ax)*(Cy-Ay) - (Cx-Ax)*(By-Ay)) * 0.5 < 22 * this.dpr * this.dpr) return; // too small
       const vx = S.vx[i], vy = S.vy[i], sp = Math.hypot(vx, vy);
-      const gen = S.gen[i] - 1, hue = S.hue[i], bri = S.bri[i], life = this.shardTTL;
+      const gen = S.gen[i] - 1, hue = S.hue[i], bri = S.bri[i], src = S.src[i], life = this.shardTTL;
 
       if (Math.random() < 0.4) {                    // simple 2-way cut along the longest edge
         const dAB = (Ax-Bx)**2+(Ay-By)**2, dBC = (Bx-Cx)**2+(By-Cy)**2, dCA = (Cx-Ax)**2+(Cy-Ay)**2;
@@ -525,8 +526,8 @@
         else if (dBC >= dCA)          { px = Ax; py = Ay; q1x = Bx; q1y = By; q2x = Cx; q2y = Cy; }
         else                          { px = Bx; py = By; q1x = Cx; q1y = Cy; q2x = Ax; q2y = Ay; }
         const mx = (q1x+q2x)/2, my = (q1y+q2y)/2, vl = sp || 1, nx = -vy/vl, ny = vx/vl, kick = (20 + Math.random()*45) * this.dpr;
-        this._writeShard(i, px, py, q1x, q1y, mx, my, vx + nx*kick, vy + ny*kick, gen, hue, life, bri);
-        this._writeShard(this.sh.i++ % MAX_SHARDS, px, py, mx, my, q2x, q2y, vx - nx*kick, vy - ny*kick, gen, hue, life, bri);
+        this._writeShard(i, px, py, q1x, q1y, mx, my, vx + nx*kick, vy + ny*kick, gen, hue, life, bri, src);
+        this._writeShard(this.sh.i++ % MAX_SHARDS, px, py, mx, my, q2x, q2y, vx - nx*kick, vy - ny*kick, gen, hue, life, bri, src);
         return;
       }
 
@@ -552,7 +553,7 @@
         let dx = tcx-Px, dy = tcy-Py; const dl = Math.hypot(dx, dy) || 1;
         const idx = j === 0 ? i : this.sh.i++ % MAX_SHARDS;   // reuse slot i for the first piece
         this._writeShard(idx, Px, Py, px[j], py[j], px[n], py[n],
-          vx + dx/dl*div, vy + dy/dl*div, gen, hue + (Math.random()-0.5)*30, life, bri);
+          vx + dx/dl*div, vy + dy/dl*div, gen, hue + (Math.random()-0.5)*30, life, bri, src);
       }
     }
 
@@ -560,10 +561,9 @@
     // facets (its projected edges), additive iridescent triangles fading out.
     _shards(dt) {
       const S = this.sh, ctx = this.ctx, grav = 460 * this.dpr;   // strong gravity → shards fall to the bottom
-      const H = this.canvas.height, floor = H + 40 * this.dpr;
+      const H = this.canvas.height, floor = H + 40 * this.dpr, hw = this.canvas.width / 2, hh = H / 2;
+      const layers = this.layers;
       const bounce = this.shatterOn && (this.bounceOpt === 'auto' ? this.specOn : this.bounceOpt === true && this.fillOn);
-      const L0 = bounce && this.activeCount ? this.layers[0] : null;
-      const ep = L0 && L0.proj, ee = L0 && L0.fe, en = L0 ? L0.ne : 0;
       ctx.save(); ctx.globalCompositeOperation = 'lighter';
       for (let i = 0; i < MAX_SHARDS; i++) {
         if (S.life[i] <= 0) continue;
@@ -571,19 +571,24 @@
         if (S.life[i] <= 0) continue;
         S.vy[i] += grav * dt;
         const px = S.x[i], py = S.y[i]; let nx = px + S.vx[i]*dt, ny = py + S.vy[i]*dt, bounced = false;
-        if (L0) {                                 // reflect off the nearest crossed outer edge
-          let bt = 2, bex = 0, bey = 0;
-          const rx = nx-px, ry = ny-py;
-          for (let e = 0, q = 0; e < en; e++, q += 2) {
-            const a1 = ee[q] << 1, b1 = ee[q+1] << 1, ax1 = ep[a1], ay1 = ep[a1+1], sx = ep[b1]-ax1, sy = ep[b1+1]-ay1;
-            const den = rx*sy - ry*sx; if (den > -1e-6 && den < 1e-6) continue;
-            const t = ((ax1-px)*sy - (ay1-py)*sx) / den, u = ((ax1-px)*ry - (ay1-py)*rx) / den;
-            if (t >= 0 && t <= 1 && u >= 0 && u <= 1 && t < bt) { bt = t; bex = sx; bey = sy; }
-          }
-          if (bt <= 1) {
-            const el = Math.hypot(bex, bey) || 1, dxu = bex/el, dyu = bey/el, vd = S.vx[i]*dxu + S.vy[i]*dyu;
-            S.vx[i] = (2*vd*dxu - S.vx[i]) * 0.72; S.vy[i] = (2*vd*dyu - S.vy[i]) * 0.72; S.vr[i] *= -0.7;
-            nx = px + rx*bt*0.9; ny = py + ry*bt*0.9; bounced = true;
+        // 3D nesting: the geodes are concentric spheres (radius = mean projected
+        // extent). A shard bounces only off shells BIGGER than its own (the ones
+        // that enclose it), reflecting off the radial normal. It never hits the
+        // smaller shells nested below it. Outermost-layer shards enclose nothing.
+        if (bounce) {
+          const src = S.src[i] | 0, nLay = Math.min(src, this.activeCount);
+          if (nLay > 0) {
+            const dxo = px-hw, dyo = py-hh, dOld = Math.sqrt(dxo*dxo + dyo*dyo);
+            const dxn = nx-hw, dyn = ny-hh, dNew = Math.sqrt(dxn*dxn + dyn*dyn);
+            if (dNew > dOld) {                    // moving outward → may cross an enclosing shell
+              let hitR = 0;
+              for (let s = 0; s < nLay; s++) { const R = layers[s]._R; if (R > dOld && R <= dNew && (hitR === 0 || R < hitR)) hitR = R; }
+              if (hitR > 0) {
+                const ux = dxn/dNew, uy = dyn/dNew, vd = S.vx[i]*ux + S.vy[i]*uy;   // radial speed
+                S.vx[i] = (S.vx[i] - 2*vd*ux) * 0.72; S.vy[i] = (S.vy[i] - 2*vd*uy) * 0.72; S.vr[i] *= -0.7;
+                nx = hw + ux*hitR*0.98; ny = hh + uy*hitR*0.98; bounced = true;
+              }
+            }
           }
         }
         S.x[i] = nx; S.y[i] = ny; S.rot[i] += S.vr[i] * dt;
@@ -635,13 +640,16 @@
       for (let li = 0; li < this.activeCount; li++) {
         const L = this.layers[li], { fv, rv, fe, nv, ne, proj } = L, sc = L.sc * (li === 0 ? pulse : 1);
         this._rot(this.t * L.spd[0] + this.smx * L.mInf, this.t * L.spd[1] + this.smy * L.mInf, this.t * L.spd[2]);
+        let rsum = 0;
         for (let i = 0, a = 0, b = 0; i < nv; i++, a += 3, b += 2) {
           const x = fv[a], y = fv[a+1], z = fv[a+2];
           const rx = (R[0]*x + R[1]*y + R[2]*z) * sc, ry = (R[3]*x + R[4]*y + R[5]*z) * sc, rz = (R[6]*x + R[7]*y + R[8]*z) * sc;
           rv[a] = rx; rv[a+1] = ry; rv[a+2] = rz;
           const f = fov / (camZ - rz);      // perspective (–tz = camZ – rz)
-          proj[b] = hw + rx * f; proj[b+1] = hh - ry * f;
+          const sx = rx * f, sy = ry * f; proj[b] = hw + sx; proj[b+1] = hh - sy;
+          rsum += Math.sqrt(sx*sx + sy*sy);
         }
+        L._R = rsum / nv;                   // mean projected radius (this layer's shell size)
         // Current colour = base hue drifted over time ("colours change").
         L._col = hsl((L.h + this.hue) % 360, L.s, L.l);
         // Holographic pass: translucent, lit, depth-sorted faces (tier-gated).
