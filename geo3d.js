@@ -183,6 +183,13 @@
     preset: 'default', colors: null, layers: 3, speed: 'normal',
     background: null, breathe: 0.04, subdivisions: 1, quality: 'auto',
     fov: 0.9, camera: 3.5, mouse: 0.035, random: false, seed: null,
+    // Living-glass shatter (all tunable):
+    shatter: true,        // enable click / spontaneous shatter
+    breakInterval: 6,     // avg seconds between spontaneous breaks (slower = calmer)
+    reform: 5,            // base seconds a shattered face stays gone before reforming
+    bounce: 'auto',       // shards bounce off the outer layer: 'auto' (ultra) | true | false
+    hueDrift: 5,          // colour drift, degrees/second
+    shardLife: 1.3,       // base shard lifetime, seconds
   };
 
   /* ── Engine ────────────────────────────────────────────────────────────── */
@@ -219,14 +226,23 @@
       this.fillOn = TIERS[lvl].fill;
       this.specOn = TIERS[lvl].spec;
 
-      // Living-glass state: slow hue drift, a spontaneous-shatter timer, and a
-      // reusable glass-shard particle pool (no per-frame allocation).
-      this.hue = 0; this.breakTimer = 1.5; this._dt = 0;
+      // Living-glass shatter — all tunable.
+      this.shatterOn = o.shatter !== false;
+      this.breakInterval = Math.max(0.3, +o.breakInterval || 6);
+      this.reformBase = Math.max(0.5, +o.reform || 5);
+      this.bounceOpt = o.bounce;                       // 'auto' | true | false
+      this.hueRate = o.hueDrift == null ? 5 : +o.hueDrift;
+      this.shardLifeBase = Math.max(0.2, +o.shardLife || 1.3);
+      this.hue = 0; this._dt = 0;
+      this.breakTimer = this.breakInterval * (0.5 + Math.random());
+      // Reusable shard pool — each shard is a triangular glass piece of a face
+      // (its 3 vertices, relative to the piece's centre), so no per-frame alloc.
       const M = MAX_SHARDS;
       this.sh = {
         x: new Float32Array(M), y: new Float32Array(M), vx: new Float32Array(M), vy: new Float32Array(M),
-        rot: new Float32Array(M), vr: new Float32Array(M), life: new Float32Array(M), ml: new Float32Array(M),
-        size: new Float32Array(M), hue: new Float32Array(M), i: 0,
+        rot: new Float32Array(M), vr: new Float32Array(M), life: new Float32Array(M), ml: new Float32Array(M), hue: new Float32Array(M),
+        ax: new Float32Array(M), ay: new Float32Array(M), bx: new Float32Array(M), by: new Float32Array(M), cx: new Float32Array(M), cy: new Float32Array(M),
+        i: 0,
       };
 
       this.shapes = catalogue(this.curSub);
@@ -409,7 +425,7 @@
 
     // Click → shatter the front-most filled face under the pointer.
     _click(cx, cy) {
-      if (!this.fillOn) return;                 // shatter only when resources allow fills
+      if (!this.shatterOn || !this.fillOn) return;   // only when resources allow fills
       const r = this.canvas.getBoundingClientRect();
       const px = (cx - r.left) * this.canvas.width / r.width, py = (cy - r.top) * this.canvas.height / r.height;
       for (let li = this.activeCount - 1; li >= 0; li--) {          // inner (top) layers first
@@ -432,43 +448,81 @@
       if (L.fst[k] <= 0) this._break(L, k);
     }
 
-    // Shatter face k of layer L: spawn iridescent shards from its centroid,
-    // then mark it gone for a few seconds (it reforms afterwards).
+    // Shatter face k of L: split its projected polygon into real triangular
+    // pieces (fan, then centre-split at ultra) — so shards vary in size and
+    // together cover the face's surface — and fling them out from the centre.
+    // The face is then gone for ~`reform`s before it comes back.
     _break(L, k) {
-      const face = L.faces[L.fillFaces[k]], proj = L.proj;
-      let cx = 0, cy = 0;
-      for (let j = 0; j < face.length; j++) { cx += proj[face[j]*2]; cy += proj[face[j]*2+1]; }
-      cx /= face.length; cy /= face.length;
-      const count = (this.specOn ? 3 : 2) * face.length;
-      for (let s = 0; s < count; s++) this._spawnShard(cx, cy, (L.h + this.hue) % 360);
-      L.fst[k] = 2.5 + Math.random() * 4.5;     // reforms after 2.5–7 s
+      const face = L.faces[L.fillFaces[k]], proj = L.proj, hue = (L.h + this.hue) % 360;
+      let fcx = 0, fcy = 0;
+      for (let j = 0; j < face.length; j++) { fcx += proj[face[j]*2]; fcy += proj[face[j]*2+1]; }
+      fcx /= face.length; fcy /= face.length;
+      const x0 = proj[face[0]*2], y0 = proj[face[0]*2+1];
+      for (let j = 1; j < face.length - 1; j++) {
+        const x1 = proj[face[j]*2], y1 = proj[face[j]*2+1], x2 = proj[face[j+1]*2], y2 = proj[face[j+1]*2+1];
+        if (this.specOn) {                       // finer shatter: centre-split each triangle
+          const tx = (x0+x1+x2)/3, ty = (y0+y1+y2)/3;
+          this._piece(x0, y0, x1, y1, tx, ty, fcx, fcy, hue);
+          this._piece(x1, y1, x2, y2, tx, ty, fcx, fcy, hue);
+          this._piece(x2, y2, x0, y0, tx, ty, fcx, fcy, hue);
+        } else {
+          this._piece(x0, y0, x1, y1, x2, y2, fcx, fcy, hue);
+        }
+      }
+      L.fst[k] = this.reformBase * (0.7 + Math.random() * 0.9);
     }
 
-    _spawnShard(x, y, hue) {
-      const S = this.sh, i = S.i++ % MAX_SHARDS, ang = Math.random() * 6.2832, spd = (30 + Math.random() * 170) * this.dpr;
-      S.x[i] = x; S.y[i] = y;
-      S.vx[i] = Math.cos(ang) * spd; S.vy[i] = Math.sin(ang) * spd - 30 * this.dpr;
-      S.rot[i] = Math.random() * 6.2832; S.vr[i] = (Math.random() - 0.5) * 10;
-      S.life[i] = S.ml[i] = 0.6 + Math.random() * 1.0;
-      S.size[i] = (3 + Math.random() * 8) * this.dpr;
-      S.hue[i] = hue + (Math.random() - 0.5) * 70;   // iridescent spread
+    // Spawn one triangular shard = the screen triangle (x1,y1)(x2,y2)(x3,y3),
+    // stored relative to its centre, flung outward from the face centre.
+    _piece(x1, y1, x2, y2, x3, y3, fcx, fcy, hue) {
+      const S = this.sh, i = S.i++ % MAX_SHARDS, cx = (x1+x2+x3) / 3, cy = (y1+y2+y3) / 3;
+      S.x[i] = cx; S.y[i] = cy;
+      S.ax[i] = x1-cx; S.ay[i] = y1-cy; S.bx[i] = x2-cx; S.by[i] = y2-cy; S.cx[i] = x3-cx; S.cy[i] = y3-cy;
+      let dx = cx-fcx, dy = cy-fcy; const dl = Math.hypot(dx, dy) || 1; dx /= dl; dy /= dl;
+      const spd = (35 + Math.random() * 135) * this.dpr, jt = 55 * this.dpr;
+      S.vx[i] = dx*spd + (Math.random()-0.5)*jt;
+      S.vy[i] = dy*spd + (Math.random()-0.5)*jt - 25*this.dpr;
+      S.rot[i] = 0; S.vr[i] = (Math.random()-0.5) * 7;
+      S.life[i] = S.ml[i] = this.shardLifeBase * (0.6 + Math.random() * 0.8);
+      S.hue[i] = hue + (Math.random()-0.5) * 70;
     }
 
-    // Update + draw all live shards (additive, iridescent, gravity-fed, fading).
+    // Update + draw live shards: gravity, optional bounce off the OUTER layer's
+    // facets (its projected edges), additive iridescent triangles fading out.
     _shards(dt) {
-      const S = this.sh, ctx = this.ctx, grav = 240 * this.dpr;
+      const S = this.sh, ctx = this.ctx, grav = 200 * this.dpr;
+      const bounce = this.shatterOn && (this.bounceOpt === 'auto' ? this.specOn : this.bounceOpt === true && this.fillOn);
+      const L0 = bounce && this.activeCount ? this.layers[0] : null;
+      const ep = L0 && L0.proj, ee = L0 && L0.fe, en = L0 ? L0.ne : 0;
       ctx.save(); ctx.globalCompositeOperation = 'lighter';
       for (let i = 0; i < MAX_SHARDS; i++) {
         if (S.life[i] <= 0) continue;
         S.life[i] -= dt;
         if (S.life[i] <= 0) continue;
-        S.vy[i] += grav * dt; S.x[i] += S.vx[i] * dt; S.y[i] += S.vy[i] * dt; S.rot[i] += S.vr[i] * dt;
-        const f = S.life[i] / S.ml[i], sz = S.size[i] * (0.5 + f * 0.5);
-        const hue = (S.hue[i] + this.hue * 2 + (1 - f) * 90) % 360;   // shifts as it flies (iridescence)
+        S.vy[i] += grav * dt;
+        const px = S.x[i], py = S.y[i]; let nx = px + S.vx[i]*dt, ny = py + S.vy[i]*dt;
+        if (L0) {                                 // reflect off the nearest crossed outer edge
+          let bt = 2, bex = 0, bey = 0;
+          const rx = nx-px, ry = ny-py;
+          for (let e = 0, q = 0; e < en; e++, q += 2) {
+            const a1 = ee[q] << 1, b1 = ee[q+1] << 1, ax1 = ep[a1], ay1 = ep[a1+1], sx = ep[b1]-ax1, sy = ep[b1+1]-ay1;
+            const den = rx*sy - ry*sx; if (den > -1e-6 && den < 1e-6) continue;
+            const t = ((ax1-px)*sy - (ay1-py)*sx) / den, u = ((ax1-px)*ry - (ay1-py)*rx) / den;
+            if (t >= 0 && t <= 1 && u >= 0 && u <= 1 && t < bt) { bt = t; bex = sx; bey = sy; }
+          }
+          if (bt <= 1) {
+            const el = Math.hypot(bex, bey) || 1, dxu = bex/el, dyu = bey/el, vd = S.vx[i]*dxu + S.vy[i]*dyu;
+            S.vx[i] = (2*vd*dxu - S.vx[i]) * 0.72; S.vy[i] = (2*vd*dyu - S.vy[i]) * 0.72; S.vr[i] *= -0.7;
+            nx = px + rx*bt*0.9; ny = py + ry*bt*0.9;
+          }
+        }
+        S.x[i] = nx; S.y[i] = ny; S.rot[i] += S.vr[i] * dt;
+        const f = S.life[i] / S.ml[i];
+        const hue = ((S.hue[i] + this.hue*2 + (1-f)*90) % 360 + 360) % 360;   // iridescence
         ctx.save();
-        ctx.translate(S.x[i], S.y[i]); ctx.rotate(S.rot[i]);
-        ctx.fillStyle = `rgba(${hsl((hue + 360) % 360, 95, 66)},${f * 0.75})`;
-        ctx.beginPath(); ctx.moveTo(0, -sz); ctx.lineTo(sz * 0.66, sz * 0.6); ctx.lineTo(-sz * 0.66, sz * 0.6); ctx.closePath();
+        ctx.translate(nx, ny); ctx.rotate(S.rot[i]);
+        ctx.fillStyle = `rgba(${hsl(hue, 95, 66)},${f * 0.7})`;
+        ctx.beginPath(); ctx.moveTo(S.ax[i], S.ay[i]); ctx.lineTo(S.bx[i], S.by[i]); ctx.lineTo(S.cx[i], S.cy[i]); ctx.closePath();
         ctx.fill();
         ctx.restore();
       }
@@ -489,11 +543,11 @@
       }
       if (this._dirty) { this.resize(); this._dirty = false; }
 
-      // Living glass: slow hue drift + spontaneous shatters (resource-gated).
-      this.hue = (this.hue + dt * 5) % 360;
-      if (this.fillOn) {
+      // Living glass: hue drift + spontaneous shatters (both tunable, gated).
+      this.hue = (this.hue + dt * this.hueRate + 360) % 360;
+      if (this.shatterOn && this.fillOn) {
         this.breakTimer -= dt;
-        if (this.breakTimer <= 0) { this._breakRandom(); this.breakTimer = 0.7 + Math.random() * 2.3; }
+        if (this.breakTimer <= 0) { this._breakRandom(); this.breakTimer = this.breakInterval * (0.6 + Math.random() * 0.8); }
       }
 
       const { ctx, R } = this, W = this.canvas.width, H = this.canvas.height;
@@ -561,6 +615,9 @@
     if (has('speed')) o.speed = get('speed');
     if (has('quality')) { const q = get('quality'); o.quality = /^\d+$/.test(q) ? parseInt(q, 10) : q; }
     if (has('layers')) o.layers = parseInt(get('layers'), 10);
+    if (has('shatter')) o.shatter = get('shatter') !== 'false' && get('shatter') !== '0';
+    if (has('bounce')) { const v = get('bounce'); o.bounce = v === 'auto' ? 'auto' : (v !== 'false' && v !== '0'); }
+    for (const k of ['breakInterval', 'reform', 'hueDrift', 'shardLife']) if (has(k)) o[k] = parseFloat(get(k));
     if (has('bg')) o.background = '#' + get('bg');
     if (has('background')) o.background = get('background');
     for (const k of ['breathe', 'fov', 'camera', 'mouse']) if (has(k)) o[k] = parseFloat(get(k));
