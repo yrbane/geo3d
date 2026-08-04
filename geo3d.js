@@ -190,6 +190,10 @@
     bounce: 'auto',       // shards bounce off the outer layer: 'auto' (ultra) | true | false
     hueDrift: 5,          // colour drift, degrees/second
     shardLife: 6,         // shard safety max-age seconds (they mostly fall off-screen first)
+    gravity: 4.5,         // shard fall acceleration (world units/s²; 0 = float)
+    shardSpeed: 2.2,      // shard burst speed (world units/s)
+    restitution: 0.72,    // velocity kept after a bounce (0 = dead stop, 1 = elastic)
+    dim: 0.72,            // colour intensity kept per bounce (lower = dims faster)
   };
 
   /* ── Engine ────────────────────────────────────────────────────────────── */
@@ -233,6 +237,10 @@
       this.bounceOpt = o.bounce;                       // 'auto' | true | false
       this.hueRate = o.hueDrift == null ? 5 : +o.hueDrift;
       this.shardTTL = clamp(+o.shardLife || 6, 1, 30);   // safety max age; shards mostly die off the bottom
+      this.gravity = +o.gravity >= 0 ? +o.gravity : 4.5;
+      this.shardSpeed = clamp(+o.shardSpeed || 2.2, 0.05, 30);
+      this.restitution = clamp(o.restitution != null ? +o.restitution : 0.72, 0, 1);
+      this.dim = clamp(o.dim != null ? +o.dim : 0.72, 0.05, 1);
       this.hue = 0; this._dt = 0;
       this.breakTimer = this.breakInterval * (0.5 + Math.random());
       // Reusable shard pool — each shard is a triangular glass piece of a face
@@ -508,7 +516,7 @@
     _piece(x1, y1, z1, x2, y2, z2, x3, y3, z3, fx, fy, fz, hue) {
       const wx = (x1+x2+x3)/3, wy = (y1+y2+y3)/3, wz = (z1+z2+z3)/3;
       let dx = wx, dy = wy, dz = wz; const dl = Math.hypot(dx, dy, dz) || 1; dx /= dl; dy /= dl; dz /= dl;
-      const spd = 1.0 + Math.random() * 2.4, jt = 1.3;
+      const spd = this.shardSpeed * (0.45 + Math.random() * 1.1), jt = this.shardSpeed * 0.55;
       this._writeShard(this.sh.i++ % MAX_SHARDS, wx, wy, wz,
         x1-wx, y1-wy, x2-wx, y2-wy, x3-wx, y3-wy,
         dx*spd + (Math.random()-0.5)*jt, dy*spd + (Math.random()-0.5)*jt, dz*spd + (Math.random()-0.5)*jt,
@@ -573,7 +581,7 @@
     _shards(dt) {
       const S = this.sh, ctx = this.ctx, layers = this.layers, nAct = this.activeCount;
       const W = this.canvas.width, H = this.canvas.height, hw = W/2, hh = H/2;
-      const fov = Math.min(W, H) * this.fov, camZ = this.camZ, floor = H + 40 * this.dpr, grav = 4.5;
+      const fov = Math.min(W, H) * this.fov, camZ = this.camZ, floor = H + 40 * this.dpr, grav = this.gravity, rest = this.restitution;
       const bounce = this.shatterOn && (this.bounceOpt === 'auto' ? this.specOn : this.bounceOpt === true && this.fillOn);
       ctx.save(); ctx.globalCompositeOperation = 'lighter';
       for (let i = 0; i < MAX_SHARDS; i++) {
@@ -593,12 +601,12 @@
           for (let s = 0; s < nAct; s++) { const Rs = layers[s]._sc; if (Rs > lo && Rs <= hi) { const g = Math.abs(Rs - dOld); if (g < gap) { gap = g; hitR = Rs; } } }
           if (hitR > 0) {
             const inv = 1 / (dNew || 1), ux = nx*inv, uy = ny*inv, uz = nz*inv, vd = S.vx[i]*ux + S.vy[i]*uy + S.vz[i]*uz;
-            S.vx[i] = (S.vx[i] - 2*vd*ux) * 0.72; S.vy[i] = (S.vy[i] - 2*vd*uy) * 0.72; S.vz[i] = (S.vz[i] - 2*vd*uz) * 0.72; S.vr[i] *= -0.7;
+            S.vx[i] = (S.vx[i] - 2*vd*ux) * rest; S.vy[i] = (S.vy[i] - 2*vd*uy) * rest; S.vz[i] = (S.vz[i] - 2*vd*uz) * rest; S.vr[i] *= -0.7;
             nx = ux*hitR; ny = uy*hitR; nz = uz*hitR; bounced = true;
           }
         }
         S.wx[i] = nx; S.wy[i] = ny; S.wz[i] = nz; S.rot[i] += S.vr[i] * dt;
-        if (bounced) { S.bri[i] *= 0.72; this._splitShard(i); }   // each bounce dims the colour + re-breaks
+        if (bounced) { S.bri[i] *= this.dim; this._splitShard(i); }   // each bounce dims the colour + re-breaks
         const denom = camZ - S.wz[i];
         if (denom < 0.05) { S.life[i] = 0; continue; }             // crossed behind the camera
         const f = fov / denom, sx = hw + S.wx[i]*f, sy = hh - S.wy[i]*f;
@@ -705,7 +713,7 @@
     if (has('layers')) o.layers = parseInt(get('layers'), 10);
     if (has('shatter')) o.shatter = get('shatter') !== 'false' && get('shatter') !== '0';
     if (has('bounce')) { const v = get('bounce'); o.bounce = v === 'auto' ? 'auto' : (v !== 'false' && v !== '0'); }
-    for (const k of ['breakInterval', 'reform', 'hueDrift', 'shardLife']) if (has(k)) o[k] = parseFloat(get(k));
+    for (const k of ['breakInterval', 'reform', 'hueDrift', 'shardLife', 'gravity', 'shardSpeed', 'restitution', 'dim']) if (has(k)) o[k] = parseFloat(get(k));
     if (has('bg')) o.background = '#' + get('bg');
     if (has('background')) o.background = get('background');
     for (const k of ['breathe', 'fov', 'camera', 'mouse']) if (has(k)) o[k] = parseFloat(get(k));

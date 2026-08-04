@@ -73,6 +73,10 @@ Every option is also accepted as a URL query parameter on the auto-init canvas.
 | `bounce` | shards bounce in 3D off the geode spheres they cross — `auto` (ultra) · `true` · `false` | `auto` |
 | `hueDrift` | palette drift, degrees/second | `5` |
 | `shardLife` | shard safety max-age, seconds (they usually fall off-screen first) | `6` |
+| `gravity` | shard fall acceleration (world units/s²; `0` = float) | `4.5` |
+| `shardSpeed` | shard burst speed (world units/s) | `2.2` |
+| `restitution` | velocity kept after a bounce (`0` dead stop … `1` elastic) | `0.72` |
+| `dim` | colour intensity kept per bounce (lower = dims faster) | `0.72` |
 
 ```
 ?random
