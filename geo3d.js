@@ -242,6 +242,7 @@
         x: new Float32Array(M), y: new Float32Array(M), vx: new Float32Array(M), vy: new Float32Array(M),
         rot: new Float32Array(M), vr: new Float32Array(M), life: new Float32Array(M), ml: new Float32Array(M), hue: new Float32Array(M),
         ax: new Float32Array(M), ay: new Float32Array(M), bx: new Float32Array(M), by: new Float32Array(M), cx: new Float32Array(M), cy: new Float32Array(M),
+        gen: new Float32Array(M),   // remaining re-break generations (splits on bounce)
         i: 0,
       };
 
@@ -472,25 +473,49 @@
       L.fst[k] = this.reformBase * (0.7 + Math.random() * 0.9);
     }
 
-    // Spawn one triangular shard = the screen triangle (x1,y1)(x2,y2)(x3,y3),
-    // stored relative to its centre, flung outward from the face centre.
+    // Low-level: write a triangular shard (screen coords) into slot idx.
+    _writeShard(idx, x1, y1, x2, y2, x3, y3, vx, vy, gen, hue, life) {
+      const S = this.sh, cx = (x1+x2+x3) / 3, cy = (y1+y2+y3) / 3;
+      S.x[idx] = cx; S.y[idx] = cy;
+      S.ax[idx] = x1-cx; S.ay[idx] = y1-cy; S.bx[idx] = x2-cx; S.by[idx] = y2-cy; S.cx[idx] = x3-cx; S.cy[idx] = y3-cy;
+      S.vx[idx] = vx; S.vy[idx] = vy; S.rot[idx] = 0; S.vr[idx] = (Math.random()-0.5) * 8;
+      S.life[idx] = S.ml[idx] = life; S.hue[idx] = hue; S.gen[idx] = gen;
+    }
+
+    // A fresh piece flung outward from the face centre (fcx,fcy).
     _piece(x1, y1, x2, y2, x3, y3, fcx, fcy, hue) {
-      const S = this.sh, i = S.i++ % MAX_SHARDS, cx = (x1+x2+x3) / 3, cy = (y1+y2+y3) / 3;
-      S.x[i] = cx; S.y[i] = cy;
-      S.ax[i] = x1-cx; S.ay[i] = y1-cy; S.bx[i] = x2-cx; S.by[i] = y2-cy; S.cx[i] = x3-cx; S.cy[i] = y3-cy;
+      const cx = (x1+x2+x3) / 3, cy = (y1+y2+y3) / 3;
       let dx = cx-fcx, dy = cy-fcy; const dl = Math.hypot(dx, dy) || 1; dx /= dl; dy /= dl;
       const spd = (35 + Math.random() * 135) * this.dpr, jt = 55 * this.dpr;
-      S.vx[i] = dx*spd + (Math.random()-0.5)*jt;
-      S.vy[i] = dy*spd + (Math.random()-0.5)*jt - 25*this.dpr;
-      S.rot[i] = 0; S.vr[i] = (Math.random()-0.5) * 7;
-      S.life[i] = S.ml[i] = this.shardLifeBase * (0.6 + Math.random() * 0.8);
-      S.hue[i] = hue + (Math.random()-0.5) * 70;
+      this._writeShard(this.sh.i++ % MAX_SHARDS, x1, y1, x2, y2, x3, y3,
+        dx*spd + (Math.random()-0.5)*jt, dy*spd + (Math.random()-0.5)*jt - 25*this.dpr,
+        this.specOn ? 2 : 1, hue + (Math.random()-0.5) * 70, this.shardLifeBase * (0.6 + Math.random() * 0.8));
+    }
+
+    // Re-break shard i on bounce into two smaller pieces along its longest edge,
+    // while it still has generations left and is big enough to split.
+    _splitShard(i) {
+      const S = this.sh;
+      if (S.gen[i] <= 0) return;
+      const ax = S.x[i]+S.ax[i], ay = S.y[i]+S.ay[i], bx = S.x[i]+S.bx[i], by = S.y[i]+S.by[i], cx = S.x[i]+S.cx[i], cy = S.y[i]+S.cy[i];
+      if (Math.abs((bx-ax)*(cy-ay) - (cx-ax)*(by-ay)) * 0.5 < 24 * this.dpr * this.dpr) return; // too small
+      const dAB = (ax-bx)**2 + (ay-by)**2, dBC = (bx-cx)**2 + (by-cy)**2, dCA = (cx-ax)**2 + (cy-ay)**2;
+      let px, py, q1x, q1y, q2x, q2y;
+      if (dAB >= dBC && dAB >= dCA) { px = cx; py = cy; q1x = ax; q1y = ay; q2x = bx; q2y = by; }
+      else if (dBC >= dCA)          { px = ax; py = ay; q1x = bx; q1y = by; q2x = cx; q2y = cy; }
+      else                          { px = bx; py = by; q1x = cx; q1y = cy; q2x = ax; q2y = ay; }
+      const mx = (q1x+q2x) / 2, my = (q1y+q2y) / 2;
+      const vx = S.vx[i], vy = S.vy[i], vl = Math.hypot(vx, vy) || 1, nxp = -vy/vl, nyp = vx/vl;
+      const kick = (20 + Math.random() * 45) * this.dpr, gen = S.gen[i] - 1;
+      const life = Math.max(S.life[i] * 0.85, this.shardLifeBase * 0.4), hue = S.hue[i];
+      this._writeShard(i, px, py, q1x, q1y, mx, my, vx + nxp*kick, vy + nyp*kick, gen, hue, life);
+      this._writeShard(this.sh.i++ % MAX_SHARDS, px, py, mx, my, q2x, q2y, vx - nxp*kick, vy - nyp*kick, gen, hue, life);
     }
 
     // Update + draw live shards: gravity, optional bounce off the OUTER layer's
     // facets (its projected edges), additive iridescent triangles fading out.
     _shards(dt) {
-      const S = this.sh, ctx = this.ctx, grav = 200 * this.dpr;
+      const S = this.sh, ctx = this.ctx, grav = 460 * this.dpr;   // strong gravity → shards fall well down
       const bounce = this.shatterOn && (this.bounceOpt === 'auto' ? this.specOn : this.bounceOpt === true && this.fillOn);
       const L0 = bounce && this.activeCount ? this.layers[0] : null;
       const ep = L0 && L0.proj, ee = L0 && L0.fe, en = L0 ? L0.ne : 0;
@@ -500,7 +525,7 @@
         S.life[i] -= dt;
         if (S.life[i] <= 0) continue;
         S.vy[i] += grav * dt;
-        const px = S.x[i], py = S.y[i]; let nx = px + S.vx[i]*dt, ny = py + S.vy[i]*dt;
+        const px = S.x[i], py = S.y[i]; let nx = px + S.vx[i]*dt, ny = py + S.vy[i]*dt, bounced = false;
         if (L0) {                                 // reflect off the nearest crossed outer edge
           let bt = 2, bex = 0, bey = 0;
           const rx = nx-px, ry = ny-py;
@@ -513,14 +538,15 @@
           if (bt <= 1) {
             const el = Math.hypot(bex, bey) || 1, dxu = bex/el, dyu = bey/el, vd = S.vx[i]*dxu + S.vy[i]*dyu;
             S.vx[i] = (2*vd*dxu - S.vx[i]) * 0.72; S.vy[i] = (2*vd*dyu - S.vy[i]) * 0.72; S.vr[i] *= -0.7;
-            nx = px + rx*bt*0.9; ny = py + ry*bt*0.9;
+            nx = px + rx*bt*0.9; ny = py + ry*bt*0.9; bounced = true;
           }
         }
         S.x[i] = nx; S.y[i] = ny; S.rot[i] += S.vr[i] * dt;
+        if (bounced) this._splitShard(i);         // re-break into smaller pieces on each bounce
         const f = S.life[i] / S.ml[i];
         const hue = ((S.hue[i] + this.hue*2 + (1-f)*90) % 360 + 360) % 360;   // iridescence
         ctx.save();
-        ctx.translate(nx, ny); ctx.rotate(S.rot[i]);
+        ctx.translate(S.x[i], S.y[i]); ctx.rotate(S.rot[i]);
         ctx.fillStyle = `rgba(${hsl(hue, 95, 66)},${f * 0.7})`;
         ctx.beginPath(); ctx.moveTo(S.ax[i], S.ay[i]); ctx.lineTo(S.bx[i], S.by[i]); ctx.lineTo(S.cx[i], S.cy[i]); ctx.closePath();
         ctx.fill();
