@@ -492,24 +492,55 @@
         this.specOn ? 2 : 1, hue + (Math.random()-0.5) * 70, this.shardLifeBase * (0.6 + Math.random() * 0.8));
     }
 
-    // Re-break shard i on bounce into two smaller pieces along its longest edge,
-    // while it still has generations left and is big enough to split.
+    // Re-break shard i on bounce into a RANDOM but physically coherent number
+    // of smaller pieces (sometimes 2, sometimes many — more when the impact is
+    // fast). The pieces exactly tile the original triangle (area conserved):
+    // a 2-way longest-edge cut, or a fan from an interior point to the boundary
+    // (vertices + occasional edge points). Bounded + generation-limited = light.
     _splitShard(i) {
       const S = this.sh;
       if (S.gen[i] <= 0) return;
-      const ax = S.x[i]+S.ax[i], ay = S.y[i]+S.ay[i], bx = S.x[i]+S.bx[i], by = S.y[i]+S.by[i], cx = S.x[i]+S.cx[i], cy = S.y[i]+S.cy[i];
-      if (Math.abs((bx-ax)*(cy-ay) - (cx-ax)*(by-ay)) * 0.5 < 24 * this.dpr * this.dpr) return; // too small
-      const dAB = (ax-bx)**2 + (ay-by)**2, dBC = (bx-cx)**2 + (by-cy)**2, dCA = (cx-ax)**2 + (cy-ay)**2;
-      let px, py, q1x, q1y, q2x, q2y;
-      if (dAB >= dBC && dAB >= dCA) { px = cx; py = cy; q1x = ax; q1y = ay; q2x = bx; q2y = by; }
-      else if (dBC >= dCA)          { px = ax; py = ay; q1x = bx; q1y = by; q2x = cx; q2y = cy; }
-      else                          { px = bx; py = by; q1x = cx; q1y = cy; q2x = ax; q2y = ay; }
-      const mx = (q1x+q2x) / 2, my = (q1y+q2y) / 2;
-      const vx = S.vx[i], vy = S.vy[i], vl = Math.hypot(vx, vy) || 1, nxp = -vy/vl, nyp = vx/vl;
-      const kick = (20 + Math.random() * 45) * this.dpr, gen = S.gen[i] - 1;
-      const life = Math.max(S.life[i] * 0.85, this.shardLifeBase * 0.4), hue = S.hue[i];
-      this._writeShard(i, px, py, q1x, q1y, mx, my, vx + nxp*kick, vy + nyp*kick, gen, hue, life);
-      this._writeShard(this.sh.i++ % MAX_SHARDS, px, py, mx, my, q2x, q2y, vx - nxp*kick, vy - nyp*kick, gen, hue, life);
+      const Ax = S.x[i]+S.ax[i], Ay = S.y[i]+S.ay[i], Bx = S.x[i]+S.bx[i], By = S.y[i]+S.by[i], Cx = S.x[i]+S.cx[i], Cy = S.y[i]+S.cy[i];
+      if (Math.abs((Bx-Ax)*(Cy-Ay) - (Cx-Ax)*(By-Ay)) * 0.5 < 22 * this.dpr * this.dpr) return; // too small
+      const vx = S.vx[i], vy = S.vy[i], sp = Math.hypot(vx, vy);
+      const gen = S.gen[i] - 1, hue = S.hue[i], life = Math.max(S.life[i] * 0.85, this.shardLifeBase * 0.4);
+
+      if (Math.random() < 0.4) {                    // simple 2-way cut along the longest edge
+        const dAB = (Ax-Bx)**2+(Ay-By)**2, dBC = (Bx-Cx)**2+(By-Cy)**2, dCA = (Cx-Ax)**2+(Cy-Ay)**2;
+        let px, py, q1x, q1y, q2x, q2y;
+        if (dAB >= dBC && dAB >= dCA) { px = Cx; py = Cy; q1x = Ax; q1y = Ay; q2x = Bx; q2y = By; }
+        else if (dBC >= dCA)          { px = Ax; py = Ay; q1x = Bx; q1y = By; q2x = Cx; q2y = Cy; }
+        else                          { px = Bx; py = By; q1x = Cx; q1y = Cy; q2x = Ax; q2y = Ay; }
+        const mx = (q1x+q2x)/2, my = (q1y+q2y)/2, vl = sp || 1, nx = -vy/vl, ny = vx/vl, kick = (20 + Math.random()*45) * this.dpr;
+        this._writeShard(i, px, py, q1x, q1y, mx, my, vx + nx*kick, vy + ny*kick, gen, hue, life);
+        this._writeShard(this.sh.i++ % MAX_SHARDS, px, py, mx, my, q2x, q2y, vx - nx*kick, vy - ny*kick, gen, hue, life);
+        return;
+      }
+
+      // Fan-shatter: interior point P (biased toward centroid, always inside).
+      const r1 = Math.sqrt(Math.random()), r2 = Math.random();
+      const ux = Ax*(1-r1) + Bx*(r1*(1-r2)) + Cx*(r1*r2), uy = Ay*(1-r1) + By*(r1*(1-r2)) + Cy*(r1*r2);
+      const gx = (Ax+Bx+Cx)/3, gy = (Ay+By+Cy)/3, Px = gx + (ux-gx)*0.5, Py = gy + (uy-gy)*0.5;
+      // Boundary polygon: the 3 vertices, plus an edge point per edge with a
+      // probability that grows with impact speed → more, smaller pieces.
+      if (!this._px) { this._px = new Float32Array(6); this._py = new Float32Array(6); }
+      const px = this._px, py = this._py;
+      const pMid = Math.min(0.85, 0.25 + sp / (220 * this.dpr));
+      let m = 0, tt;
+      px[m] = Ax; py[m] = Ay; m++;
+      if (Math.random() < pMid) { tt = 0.35 + Math.random()*0.3; px[m] = Ax+(Bx-Ax)*tt; py[m] = Ay+(By-Ay)*tt; m++; }
+      px[m] = Bx; py[m] = By; m++;
+      if (Math.random() < pMid) { tt = 0.35 + Math.random()*0.3; px[m] = Bx+(Cx-Bx)*tt; py[m] = By+(Cy-By)*tt; m++; }
+      px[m] = Cx; py[m] = Cy; m++;
+      if (Math.random() < pMid) { tt = 0.35 + Math.random()*0.3; px[m] = Cx+(Ax-Cx)*tt; py[m] = Cy+(Ay-Cy)*tt; m++; }
+      const div = (22 + Math.random()*36) * this.dpr;
+      for (let j = 0; j < m; j++) {
+        const n = (j+1) % m, tcx = (Px+px[j]+px[n])/3, tcy = (Py+py[j]+py[n])/3;
+        let dx = tcx-Px, dy = tcy-Py; const dl = Math.hypot(dx, dy) || 1;
+        const idx = j === 0 ? i : this.sh.i++ % MAX_SHARDS;   // reuse slot i for the first piece
+        this._writeShard(idx, Px, Py, px[j], py[j], px[n], py[n],
+          vx + dx/dl*div, vy + dy/dl*div, gen, hue + (Math.random()-0.5)*30, life * (0.8 + Math.random()*0.4));
+      }
     }
 
     // Update + draw live shards: gravity, optional bounce off the OUTER layer's
